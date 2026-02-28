@@ -22,10 +22,24 @@ controller:
   sourceNamespace: ""
   vclusterKubeconfigDir: /etc/vcluster-kubeconfigs
   defaultDeletePolicy: delete
+  metricsBindAddress: :8080
 
 kubeconfigSecret:
   name: vcluster-kubeconfigs
   optional: false
+
+probes:
+  enabled: true
+  liveness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 3
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
 
 resources: {}
 nodeSelector: {}

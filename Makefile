@@ -41,7 +41,7 @@ run: ## Run controller locally
 	go run ./cmd/vcluster-secret-sync-controller
 
 check-tools: ## Verify required integration tools are installed
-	@for cmd in docker k3d kubectl helm; do \
+	@for cmd in docker k3d kubectl helm curl; do \
 		command -v $$cmd >/dev/null 2>&1 || { echo "missing required command: $$cmd"; exit 1; }; \
 	done
 
@@ -106,7 +106,18 @@ integration-test: integration-up ## Run full integration test and validate synce
 	@set -euo pipefail; \
 	kubectl -n "$(VCLUSTER_NAMESPACE)" port-forward "svc/$(VCLUSTER_NAME)" 8443:443 > "$(INTEGRATION_TMP_DIR)/port-forward-test.log" 2>&1 & \
 	PF_PID=$$!; \
-	trap 'kill $$PF_PID >/dev/null 2>&1 || true' EXIT; \
+	kubectl -n "$(CONTROLLER_NAMESPACE)" port-forward deployment/vcluster-secret-sync-controller 18080:8080 > "$(INTEGRATION_TMP_DIR)/port-forward-controller.log" 2>&1 & \
+	HPF_PID=$$!; \
+	trap 'kill $$PF_PID >/dev/null 2>&1 || true; kill $$HPF_PID >/dev/null 2>&1 || true' EXIT; \
+	for i in $$(seq 1 20); do \
+		if curl -fsS http://127.0.0.1:18080/readyz >/dev/null 2>&1; then \
+			break; \
+		fi; \
+		sleep 1; \
+	done; \
+	curl -fsS http://127.0.0.1:18080/healthz >/dev/null; \
+	curl -fsS http://127.0.0.1:18080/readyz >/dev/null; \
+	curl -fsS http://127.0.0.1:18080/metrics | grep -q 'secret_sync_reconcile_total'; \
 	for i in $$(seq 1 30); do \
 		if KUBECONFIG="$(INTEGRATION_TMP_DIR)/$(VCLUSTER_NAME)-local.kubeconfig" kubectl -n "$(TARGET_NAMESPACE)" get secret "$(SOURCE_SECRET_NAME)" >/dev/null 2>&1; then \
 			break; \
@@ -118,8 +129,24 @@ integration-test: integration-up ## Run full integration test and validate synce
 	password=$$(KUBECONFIG="$(INTEGRATION_TMP_DIR)/$(VCLUSTER_NAME)-local.kubeconfig" kubectl -n "$(TARGET_NAMESPACE)" get secret "$(SOURCE_SECRET_NAME)" -o jsonpath='{.data.password}' | base64 -d); \
 	[ "$$username" = "appuser" ]; \
 	[ "$$password" = "supersecret" ]; \
+	reasons=$$(kubectl -n "$(SOURCE_NAMESPACE)" get events --field-selector involvedObject.kind=Secret,involvedObject.name="$(SOURCE_SECRET_NAME)" -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}'); \
+	echo "$$reasons" | grep -Eq 'SyncCreated|SyncUpdated'; \
+	pw_b64=$$(printf 'supersecret2' | base64 | tr -d '\n'); \
+	kubectl -n "$(SOURCE_NAMESPACE)" patch secret "$(SOURCE_SECRET_NAME)" --type merge -p "{\"data\":{\"password\":\"$$pw_b64\"}}"; \
+	for i in $$(seq 1 30); do \
+		password2=$$(KUBECONFIG="$(INTEGRATION_TMP_DIR)/$(VCLUSTER_NAME)-local.kubeconfig" kubectl -n "$(TARGET_NAMESPACE)" get secret "$(SOURCE_SECRET_NAME)" -o jsonpath='{.data.password}' | base64 -d 2>/dev/null || true); \
+		if [ "$$password2" = "supersecret2" ]; then \
+			break; \
+		fi; \
+		sleep 2; \
+	done; \
+	password2=$$(KUBECONFIG="$(INTEGRATION_TMP_DIR)/$(VCLUSTER_NAME)-local.kubeconfig" kubectl -n "$(TARGET_NAMESPACE)" get secret "$(SOURCE_SECRET_NAME)" -o jsonpath='{.data.password}' | base64 -d); \
+	[ "$$password2" = "supersecret2" ]; \
+	reasons2=$$(kubectl -n "$(SOURCE_NAMESPACE)" get events --field-selector involvedObject.kind=Secret,involvedObject.name="$(SOURCE_SECRET_NAME)" -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}'); \
+	echo "$$reasons2" | grep -q 'SyncUpdated'; \
 	echo "integration test passed"; \
 	kill $$PF_PID >/dev/null 2>&1 || true; \
+	kill $$HPF_PID >/dev/null 2>&1 || true; \
 	trap - EXIT
 
 integration-down: check-tools ## Delete integration cluster and temp files
