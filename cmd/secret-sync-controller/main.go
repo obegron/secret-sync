@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 
@@ -76,6 +77,8 @@ type controller struct {
 	hostClient       kubernetes.Interface
 	cfg              runtimeConfig
 	allowedTargetIDs map[string]struct{}
+	mu               sync.RWMutex
+	vclusterClients  map[string]kubernetes.Interface
 	ready            atomic.Bool
 	metrics          metricsState
 }
@@ -145,6 +148,7 @@ func main() {
 		hostClient:       hostClient,
 		cfg:              cfg,
 		allowedTargetIDs: allowedTargetIDs,
+		vclusterClients:  map[string]kubernetes.Interface{},
 	}
 	go c.serveHTTP(ctx)
 	c.run(ctx)
@@ -546,12 +550,33 @@ func (c *controller) emitEvent(ctx context.Context, src *corev1.Secret, eventTyp
 }
 
 func (c *controller) vclusterClient(vclusterName string) (kubernetes.Interface, error) {
+	c.mu.RLock()
+	cached, ok := c.vclusterClients[vclusterName]
+	c.mu.RUnlock()
+	if ok {
+		return cached, nil
+	}
+
 	kubeconfig := filepath.Join(c.cfg.vclusterKubeconfigDir, fmt.Sprintf("%s.kubeconfig", vclusterName))
 	restCfg, err := loadConfig(kubeconfig)
 	if err != nil {
 		return nil, err
 	}
-	return kubernetes.NewForConfig(restCfg)
+
+	client, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		return nil, err
+	}
+
+	c.mu.Lock()
+	if cached, ok := c.vclusterClients[vclusterName]; ok {
+		c.mu.Unlock()
+		return cached, nil
+	}
+	c.vclusterClients[vclusterName] = client
+	c.mu.Unlock()
+
+	return client, nil
 }
 
 func (c *controller) serveHTTP(ctx context.Context) {
