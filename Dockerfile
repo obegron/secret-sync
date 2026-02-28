@@ -1,15 +1,28 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.26 AS build
-WORKDIR /src
+FROM golang:1.26-alpine AS builder
+WORKDIR /app
+
+RUN apk add --no-cache ca-certificates \
+    && echo "secret-sync:x:10001:10001:secret-sync:/:" > /etc/passwd_scratch
 
 COPY go.mod go.sum ./
 RUN go mod download
 
-COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/secret-sync-controller ./cmd/secret-sync-controller
+COPY cmd ./cmd
 
-FROM gcr.io/distroless/static:nonroot
-COPY --from=build /out/secret-sync-controller /usr/local/bin/secret-sync-controller
-USER nonroot:nonroot
-ENTRYPOINT ["/usr/local/bin/secret-sync-controller"]
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w" -o /app/secret-sync-controller ./cmd/secret-sync-controller
+
+FROM scratch
+WORKDIR /app
+
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /etc/passwd_scratch /etc/passwd
+COPY --from=builder /app/secret-sync-controller /app/secret-sync-controller
+
+USER 10001
+EXPOSE 8080
+ENTRYPOINT ["/app/secret-sync-controller"]

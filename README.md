@@ -88,6 +88,12 @@ Run full flow:
 make integration-test
 ```
 
+Run container vulnerability scan:
+
+```bash
+make scan-image
+```
+
 Teardown:
 
 ```bash

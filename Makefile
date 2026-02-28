@@ -1,7 +1,13 @@
 .DEFAULT_GOAL := build
 
 BINARY ?= secret-sync-controller
-IMAGE ?= ghcr.io/company/secret-sync-controller:latest
+VERSION := $(shell sed -n -E 's/^[[:space:]]*Version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' cmd/secret-sync-controller/main.go | head -n 1)
+IMAGE_NAME ?= obegron/secret-sync-controller
+IMAGE ?= $(IMAGE_NAME):$(VERSION)
+PLATFORMS ?= linux/amd64,linux/arm64
+TRIVY_IMAGE ?= aquasec/trivy:0.69.1
+TRIVY_SEVERITY ?= HIGH,CRITICAL
+TRIVY_EXIT_CODE ?= 1
 
 INTEGRATION_CLUSTER ?= secret-sync-it
 INTEGRATION_IMAGE ?= secret-sync-controller:it
@@ -16,7 +22,7 @@ CLUSTER_TARGET_NAMESPACE_2 ?= shared-runtime-2
 SOURCE_SECRET_NAME ?= app-db-secret
 CONTROLLER_NAMESPACE ?= secret-sync-system
 
-.PHONY: help tidy fmt vet build test docker-build run check-tools integration-up integration-test integration-down
+.PHONY: help tidy fmt vet build test docker-build-local docker-build docker-push show-version scan-image run clean check-tools integration-up integration-test integration-down
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "; print "Targets:"} /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -31,16 +37,40 @@ vet: ## Run go vet
 	go vet ./...
 
 build: ## Build controller binary (default)
-	go build -o $(BINARY) ./cmd/secret-sync-controller
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BINARY) ./cmd/secret-sync-controller
 
 test: ## Run unit tests
 	go test ./...
 
-docker-build: ## Build controller container image
-	docker build -t $(IMAGE) .
+docker-build-local: ## Build local container image for current architecture
+	docker build -t $(IMAGE_NAME):$(VERSION) -t $(IMAGE_NAME):latest .
+
+docker-build: ## Build multi-arch container image (no push)
+	docker buildx build --platform $(PLATFORMS) -t $(IMAGE_NAME):$(VERSION) -t $(IMAGE_NAME):latest .
+
+docker-push: ## Build and push multi-arch container image
+	docker buildx build --platform $(PLATFORMS) --provenance=true --sbom=true -t $(IMAGE_NAME):$(VERSION) -t $(IMAGE_NAME):latest . --push
+
+show-version: ## Print application version
+	@echo $(VERSION)
+
+scan-image: docker-build-local ## Scan local container image with Trivy
+	@mkdir -p .tmp/trivy-cache
+	docker run --rm \
+		-v /var/run/docker.sock:/var/run/docker.sock \
+		-v "$(PWD)/.tmp/trivy-cache:/root/.cache/" \
+		"$(TRIVY_IMAGE)" image \
+		--skip-version-check \
+		--severity "$(TRIVY_SEVERITY)" \
+		--exit-code "$(TRIVY_EXIT_CODE)" \
+		--no-progress \
+		"$(IMAGE_NAME):$(VERSION)"
 
 run: ## Run controller locally
 	go run ./cmd/secret-sync-controller
+
+clean: ## Remove built binaries
+	rm -f $(BINARY)
 
 check-tools: ## Verify required integration tools are installed
 	@for cmd in docker k3d kubectl helm curl; do \

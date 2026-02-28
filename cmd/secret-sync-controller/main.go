@@ -28,6 +28,8 @@ import (
 )
 
 const (
+	Version = "0.1.0"
+
 	controllerName = "secret-sync-controller"
 
 	labelSyncEnabled = "obegron.github.io/secret-sync-enabled"
@@ -98,6 +100,8 @@ type metricsState struct {
 }
 
 func main() {
+	log.Printf("starting %s version %s", controllerName, Version)
+
 	tenantSafeMode, err := parseBoolEnv("TENANT_SAFE_MODE", false)
 	if err != nil {
 		log.Fatalf("invalid TENANT_SAFE_MODE: %v", err)
@@ -583,6 +587,7 @@ func (c *controller) serveHTTP(ctx context.Context) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", c.handleHealthz)
 	mux.HandleFunc("/readyz", c.handleReadyz)
+	mux.HandleFunc("/version", c.handleVersion)
 	mux.HandleFunc("/metrics", c.handleMetrics)
 
 	server := &http.Server{
@@ -613,6 +618,11 @@ func (c *controller) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok\n"))
+}
+
+func (c *controller) handleVersion(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(Version + "\n"))
 }
 
 func (c *controller) handleMetrics(w http.ResponseWriter, _ *http.Request) {
