@@ -33,9 +33,12 @@ Optional annotation:
 ## Runtime configuration
 
 - `HOST_KUBECONFIG` (optional; if unset, use in-cluster config)
-- `SOURCE_NAMESPACE` (optional; if unset, watch all namespaces)
+- `POD_NAMESPACE` (set by Downward API in manifests/chart)
+- `SOURCE_NAMESPACE` (optional; if unset and `TENANT_SAFE_MODE=false`, watch all namespaces)
 - `VCLUSTER_KUBECONFIG_DIR` (default `/etc/vcluster-kubeconfigs`)
 - `DEFAULT_DELETE_POLICY` (`delete` or `retain`, default `delete`)
+- `TENANT_SAFE_MODE` (`true|false`, default `false`)
+- `ALLOWED_SYNC_TARGETS` (optional JSON array of allowed targets; same schema as `secret-sync-targets`)
 - `METRICS_BIND_ADDRESS` (default `:8080`; serves `/healthz`, `/readyz`, `/metrics`)
 
 Vcluster kubeconfig files are resolved as:
@@ -52,7 +55,22 @@ Vcluster kubeconfig files are resolved as:
   - `obegron.github.io/checksum=<sha256>`
 - Updates only when checksum changes.
 - If target secret is immutable and content changes, controller recreates it.
+- Existing target secrets are only updated/deleted when they are already managed by this controller and have matching source annotation.
 - On source delete, controller deletes targets unless delete policy is `retain`.
+
+## Security Modes
+
+Tenant-safe mode (recommended for tenant-owned namespaces):
+
+- Set `TENANT_SAFE_MODE=true`.
+- Omit `SOURCE_NAMESPACE` to auto-scope to `POD_NAMESPACE` (or set it explicitly to match pod namespace).
+- Only `kind=vcluster` targets are allowed.
+- Target namespace must match the controller source namespace.
+
+Platform mode (shared/system controller):
+
+- Keep `TENANT_SAFE_MODE=false`.
+- Set `SOURCE_NAMESPACE` and/or `ALLOWED_SYNC_TARGETS` to constrain blast radius.
 
 ## Local integration test
 

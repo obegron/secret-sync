@@ -19,12 +19,20 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             - name: SOURCE_NAMESPACE
               value: {{ .Values.controller.sourceNamespace | quote }}
             - name: VCLUSTER_KUBECONFIG_DIR
               value: {{ .Values.controller.vclusterKubeconfigDir | quote }}
             - name: DEFAULT_DELETE_POLICY
               value: {{ .Values.controller.defaultDeletePolicy | quote }}
+            - name: TENANT_SAFE_MODE
+              value: {{ .Values.controller.tenantSafeMode | quote }}
+            - name: ALLOWED_SYNC_TARGETS
+              value: {{ .Values.controller.allowedSyncTargets | quote }}
             - name: METRICS_BIND_ADDRESS
               value: {{ .Values.controller.metricsBindAddress | quote }}
 {{- if .Values.probes.enabled }}

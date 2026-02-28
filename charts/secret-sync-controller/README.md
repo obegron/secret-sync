@@ -19,6 +19,8 @@ image:
 controller:
   sourceNamespace: tenant-host-ns
   defaultDeletePolicy: delete
+  tenantSafeMode: true
+  allowedSyncTargets: '[{"kind":"vcluster","vcluster":"tenant-a-dev01","namespace":"tenant-host-ns"}]'
 
 kubeconfigSecret:
   name: vcluster-kubeconfigs

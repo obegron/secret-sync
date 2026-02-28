@@ -22,6 +22,8 @@ controller:
   sourceNamespace: ""
   vclusterKubeconfigDir: /etc/vcluster-kubeconfigs
   defaultDeletePolicy: delete
+  tenantSafeMode: false
+  allowedSyncTargets: ""
   metricsBindAddress: :8080
 
 kubeconfigSecret:

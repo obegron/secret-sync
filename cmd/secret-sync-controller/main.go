@@ -42,6 +42,8 @@ const (
 
 	eventReasonConfigInvalid = "SyncConfigInvalid"
 	eventReasonTargetInvalid = "SyncTargetInvalid"
+	eventReasonTargetBlocked = "SyncTargetBlocked"
+	eventReasonTargetOwned   = "SyncTargetOwnershipConflict"
 	eventReasonTargetMissing = "SyncTargetNamespaceMissing"
 	eventReasonCreated       = "SyncCreated"
 	eventReasonUpdated       = "SyncUpdated"
@@ -49,10 +51,12 @@ const (
 
 type runtimeConfig struct {
 	hostKubeconfig        string
+	podNamespace          string
 	sourceNamespace       string
 	vclusterKubeconfigDir string
 	defaultDeletePolicy   string
 	metricsBindAddress    string
+	tenantSafeMode        bool
 }
 
 type syncTarget struct {
@@ -69,10 +73,11 @@ func (t syncTarget) ID() string {
 }
 
 type controller struct {
-	hostClient kubernetes.Interface
-	cfg        runtimeConfig
-	ready      atomic.Bool
-	metrics    metricsState
+	hostClient       kubernetes.Interface
+	cfg              runtimeConfig
+	allowedTargetIDs map[string]struct{}
+	ready            atomic.Bool
+	metrics          metricsState
 }
 
 type metricsState struct {
@@ -90,12 +95,37 @@ type metricsState struct {
 }
 
 func main() {
+	tenantSafeMode, err := parseBoolEnv("TENANT_SAFE_MODE", false)
+	if err != nil {
+		log.Fatalf("invalid TENANT_SAFE_MODE: %v", err)
+	}
+
+	podNamespace := strings.TrimSpace(os.Getenv("POD_NAMESPACE"))
+	sourceNamespace := strings.TrimSpace(os.Getenv("SOURCE_NAMESPACE"))
+	if sourceNamespace == "" && tenantSafeMode {
+		sourceNamespace = podNamespace
+	}
+
+	if tenantSafeMode && sourceNamespace == "" {
+		log.Fatal("TENANT_SAFE_MODE requires SOURCE_NAMESPACE (or POD_NAMESPACE)")
+	}
+	if tenantSafeMode && podNamespace != "" && sourceNamespace != podNamespace {
+		log.Fatalf("TENANT_SAFE_MODE requires SOURCE_NAMESPACE (%q) to match POD_NAMESPACE (%q)", sourceNamespace, podNamespace)
+	}
+
+	allowedTargetIDs, err := parseAllowedTargetIDs(os.Getenv("ALLOWED_SYNC_TARGETS"))
+	if err != nil {
+		log.Fatalf("invalid ALLOWED_SYNC_TARGETS: %v", err)
+	}
+
 	cfg := runtimeConfig{
 		hostKubeconfig:        os.Getenv("HOST_KUBECONFIG"),
-		sourceNamespace:       os.Getenv("SOURCE_NAMESPACE"),
+		podNamespace:          podNamespace,
+		sourceNamespace:       sourceNamespace,
 		vclusterKubeconfigDir: envOrDefault("VCLUSTER_KUBECONFIG_DIR", "/etc/vcluster-kubeconfigs"),
 		defaultDeletePolicy:   normalizeDeletePolicy(envOrDefault("DEFAULT_DELETE_POLICY", "delete")),
 		metricsBindAddress:    envOrDefault("METRICS_BIND_ADDRESS", ":8080"),
+		tenantSafeMode:        tenantSafeMode,
 	}
 
 	hostRest, err := loadConfig(cfg.hostKubeconfig)
@@ -111,7 +141,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	c := &controller{hostClient: hostClient, cfg: cfg}
+	c := &controller{
+		hostClient:       hostClient,
+		cfg:              cfg,
+		allowedTargetIDs: allowedTargetIDs,
+	}
 	go c.serveHTTP(ctx)
 	c.run(ctx)
 }
@@ -193,10 +227,9 @@ func (c *controller) reconcile(ctx context.Context, src *corev1.Secret) error {
 
 	var errs []string
 	for _, target := range targets {
-		if target.Kind == targetKindCluster && target.Namespace == src.Namespace {
-			msg := fmt.Sprintf("target %q points to source namespace %q and is not allowed", target.ID(), src.Namespace)
-			c.emitWarningEvent(ctx, src, eventReasonTargetInvalid, msg)
-			errs = append(errs, msg)
+		if targetErr := c.validateTargetForSource(src, target); targetErr != nil {
+			c.emitWarningEvent(ctx, src, eventReasonTargetBlocked, targetErr.Error())
+			errs = append(errs, targetErr.Error())
 			continue
 		}
 
@@ -218,6 +251,7 @@ func (c *controller) reconcileTarget(ctx context.Context, src *corev1.Secret, ta
 		return err
 	}
 
+	expectedSourceRef := fmt.Sprintf("%s/%s", src.Namespace, src.Name)
 	targetName := src.Name
 	existing, err := targetClient.CoreV1().Secrets(target.Namespace).Get(ctx, targetName, metav1.GetOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {
@@ -251,6 +285,12 @@ func (c *controller) reconcileTarget(ctx context.Context, src *corev1.Secret, ta
 			c.emitNormalEvent(ctx, src, eventReasonCreated, fmt.Sprintf("synced secret to %s", target.ID()))
 		}
 		return createErr
+	}
+
+	if err := ensureManagedTarget(existing, expectedSourceRef); err != nil {
+		msg := fmt.Sprintf("target %q ownership conflict: %v", target.ID(), err)
+		c.emitWarningEvent(ctx, src, eventReasonTargetOwned, msg)
+		return errors.New(msg)
 	}
 
 	if existing.Annotations[annChecksum] == checksum {
@@ -302,13 +342,30 @@ func (c *controller) handleDelete(ctx context.Context, src *corev1.Secret) error
 
 	var errs []string
 	for _, target := range targets {
-		if target.Kind == targetKindCluster && target.Namespace == src.Namespace {
+		if targetErr := c.validateTargetForSource(src, target); targetErr != nil {
 			continue
 		}
 
 		targetClient, targetErr := c.targetClient(target)
 		if targetErr != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", target.ID(), targetErr))
+			continue
+		}
+
+		existing, getErr := targetClient.CoreV1().Secrets(target.Namespace).Get(ctx, src.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(getErr) {
+			continue
+		}
+		if getErr != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", target.ID(), getErr))
+			continue
+		}
+
+		expectedSourceRef := fmt.Sprintf("%s/%s", src.Namespace, src.Name)
+		if err := ensureManagedTarget(existing, expectedSourceRef); err != nil {
+			msg := fmt.Sprintf("target %q ownership conflict: %v", target.ID(), err)
+			c.emitWarningEvent(ctx, src, eventReasonTargetOwned, msg)
+			errs = append(errs, msg)
 			continue
 		}
 
@@ -329,6 +386,29 @@ func (c *controller) handleDelete(ctx context.Context, src *corev1.Secret) error
 	return nil
 }
 
+func (c *controller) validateTargetForSource(src *corev1.Secret, target syncTarget) error {
+	if target.Kind == targetKindCluster && target.Namespace == src.Namespace {
+		return fmt.Errorf("target %q points to source namespace %q and is not allowed", target.ID(), src.Namespace)
+	}
+
+	if c.cfg.tenantSafeMode {
+		if target.Kind != targetKindVcluster {
+			return fmt.Errorf("target %q is blocked: TENANT_SAFE_MODE only allows kind=%s", target.ID(), targetKindVcluster)
+		}
+		if target.Namespace != c.cfg.sourceNamespace {
+			return fmt.Errorf("target %q is blocked: TENANT_SAFE_MODE requires target namespace %q", target.ID(), c.cfg.sourceNamespace)
+		}
+	}
+
+	if len(c.allowedTargetIDs) > 0 {
+		if _, ok := c.allowedTargetIDs[target.ID()]; !ok {
+			return fmt.Errorf("target %q is blocked by ALLOWED_SYNC_TARGETS", target.ID())
+		}
+	}
+
+	return nil
+}
+
 func (c *controller) targetClient(target syncTarget) (kubernetes.Interface, error) {
 	switch target.Kind {
 	case targetKindCluster:
@@ -338,6 +418,20 @@ func (c *controller) targetClient(target syncTarget) (kubernetes.Interface, erro
 	default:
 		return nil, fmt.Errorf("unsupported target kind %q", target.Kind)
 	}
+}
+
+func ensureManagedTarget(existing *corev1.Secret, expectedSourceRef string) error {
+	managedBy := strings.TrimSpace(existing.Annotations[annManagedBy])
+	sourceRef := strings.TrimSpace(existing.Annotations[annSourceRef])
+
+	if managedBy != controllerName {
+		return fmt.Errorf("%s=%q (expected %q)", annManagedBy, managedBy, controllerName)
+	}
+	if sourceRef != expectedSourceRef {
+		return fmt.Errorf("%s=%q (expected %q)", annSourceRef, sourceRef, expectedSourceRef)
+	}
+
+	return nil
 }
 
 func parseTargets(raw string) ([]syncTarget, error) {
@@ -385,6 +479,24 @@ func parseTargets(raw string) ([]syncTarget, error) {
 		result = append(result, t)
 	}
 
+	return result, nil
+}
+
+func parseAllowedTargetIDs(raw string) (map[string]struct{}, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+
+	targets, err := parseTargets(raw)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		result[target.ID()] = struct{}{}
+	}
 	return result, nil
 }
 
@@ -528,6 +640,22 @@ func envOrDefault(name, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func parseBoolEnv(name string, fallback bool) (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+
+	switch strings.ToLower(raw) {
+	case "1", "true", "t", "yes", "y", "on":
+		return true, nil
+	case "0", "false", "f", "no", "n", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("unsupported boolean value %q", raw)
+	}
 }
 
 func normalizeDeletePolicy(v string) string {
