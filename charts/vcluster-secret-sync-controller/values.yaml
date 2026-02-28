@@ -1,0 +1,33 @@
+nameOverride: ""
+fullnameOverride: ""
+
+namespace:
+  create: false
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/company/vcluster-secret-sync-controller
+  tag: latest
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  create: true
+  name: ""
+
+rbac:
+  create: true
+
+controller:
+  sourceNamespace: ""
+  vclusterKubeconfigDir: /etc/vcluster-kubeconfigs
+  defaultDeletePolicy: delete
+
+kubeconfigSecret:
+  name: vcluster-kubeconfigs
+  optional: false
+
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

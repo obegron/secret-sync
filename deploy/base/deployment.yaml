@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vcluster-secret-sync-controller
+  namespace: vcluster-secret-sync-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vcluster-secret-sync-controller
+  template:
+    metadata:
+      labels:
+        app: vcluster-secret-sync-controller
+    spec:
+      serviceAccountName: vcluster-secret-sync-controller
+      containers:
+        - name: controller
+          image: ghcr.io/company/vcluster-secret-sync-controller:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SOURCE_NAMESPACE
+              value: ""
+            - name: VCLUSTER_KUBECONFIG_DIR
+              value: /etc/vcluster-kubeconfigs
+            - name: DEFAULT_DELETE_POLICY
+              value: delete
+          volumeMounts:
+            - name: vcluster-kubeconfigs
+              mountPath: /etc/vcluster-kubeconfigs
+              readOnly: true
+      volumes:
+        - name: vcluster-kubeconfigs
+          secret:
+            secretName: vcluster-kubeconfigs
+            optional: false

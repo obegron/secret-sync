@@ -1,0 +1,6 @@
+apiVersion: v2
+name: vcluster-secret-sync-controller
+description: Sync selected host-cluster secrets into target vclusters.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

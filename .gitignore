@@ -1,0 +1,25 @@
+# Build artifacts
+/vcluster-secret-sync-controller
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go coverage and profiling
+*.coverprofile
+coverage.out
+cpu.out
+mem.out
+
+# Local integration/test workspace
+/.tmp/
+
+# Editor/OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo

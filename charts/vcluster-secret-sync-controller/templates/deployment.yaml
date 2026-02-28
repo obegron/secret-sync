@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vcluster-secret-sync-controller.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ include "vcluster-secret-sync-controller.fullname" . }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "vcluster-secret-sync-controller.fullname" . }}
+    spec:
+      serviceAccountName: {{ include "vcluster-secret-sync-controller.serviceAccountName" . }}
+      containers:
+        - name: controller
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: SOURCE_NAMESPACE
+              value: {{ .Values.controller.sourceNamespace | quote }}
+            - name: VCLUSTER_KUBECONFIG_DIR
+              value: {{ .Values.controller.vclusterKubeconfigDir | quote }}
+            - name: DEFAULT_DELETE_POLICY
+              value: {{ .Values.controller.defaultDeletePolicy | quote }}
+          volumeMounts:
+            - name: vcluster-kubeconfigs
+              mountPath: {{ .Values.controller.vclusterKubeconfigDir | quote }}
+              readOnly: true
+          resources:
+{{ toYaml .Values.resources | indent 12 }}
+      volumes:
+        - name: vcluster-kubeconfigs
+          secret:
+            secretName: {{ .Values.kubeconfigSecret.name }}
+            optional: {{ .Values.kubeconfigSecret.optional }}
+{{- with .Values.nodeSelector }}
+      nodeSelector:
+{{ toYaml . | indent 8 }}
+{{- end }}
+{{- with .Values.affinity }}
+      affinity:
+{{ toYaml . | indent 8 }}
+{{- end }}
+{{- with .Values.tolerations }}
+      tolerations:
+{{ toYaml . | indent 8 }}
+{{- end }}
