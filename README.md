@@ -82,7 +82,7 @@ Defaults use:
 - vcluster release: `tenant-a-dev01` in namespace `vcluster-tenant-a-dev01`
 - source secret: `tenant-host-ns/app-db-secret`
 - vcluster target namespace: `app-runtime`
-- cluster target namespace: `shared-runtime`
+- cluster target namespaces: `shared-runtime`, `shared-runtime-2`
 
 ## License
 
@@ -122,6 +122,19 @@ KUBECONFIG=/path/to/tenant-a-dev01.kubeconfig \
   KUBECONFIG=/path/to/tenant-a-dev01.kubeconfig kubectl apply -f -
 ```
 
+For the many-target-namespaces example, also create:
+
+```bash
+kubectl create namespace shared-runtime-a --dry-run=client -o yaml | kubectl apply -f -
+kubectl create namespace shared-runtime-b --dry-run=client -o yaml | kubectl apply -f -
+KUBECONFIG=/path/to/tenant-a-dev01.kubeconfig \
+  kubectl create namespace app-runtime-a --dry-run=client -o yaml | \
+  KUBECONFIG=/path/to/tenant-a-dev01.kubeconfig kubectl apply -f -
+KUBECONFIG=/path/to/tenant-a-dev01.kubeconfig \
+  kubectl create namespace app-runtime-b --dry-run=client -o yaml | \
+  KUBECONFIG=/path/to/tenant-a-dev01.kubeconfig kubectl apply -f -
+```
+
 Apply vcluster kubeconfig secret (controller reads vcluster kubeconfigs from this Secret):
 
 ```bash
@@ -146,9 +159,16 @@ Apply a source Secret with host-cluster-only sync:
 kubectl apply -f deploy/examples/source-secret-cluster-only.yaml
 ```
 
+Apply a source Secret with many target namespaces:
+
+```bash
+kubectl apply -f deploy/examples/source-secret-many-namespaces.yaml
+```
+
 Example manifests are in:
 
 - `deploy/examples/vcluster-kubeconfigs-secret.yaml`
 - `deploy/examples/source-secret.yaml`
 - `deploy/examples/source-secret-vcluster-only.yaml`
 - `deploy/examples/source-secret-cluster-only.yaml`
+- `deploy/examples/source-secret-many-namespaces.yaml`

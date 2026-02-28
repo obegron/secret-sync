@@ -12,6 +12,7 @@ VCLUSTER_KUBECONFIG_SECRET ?= vc-$(VCLUSTER_NAME)
 SOURCE_NAMESPACE ?= tenant-host-ns
 TARGET_NAMESPACE ?= app-runtime
 CLUSTER_TARGET_NAMESPACE ?= shared-runtime
+CLUSTER_TARGET_NAMESPACE_2 ?= shared-runtime-2
 SOURCE_SECRET_NAME ?= app-db-secret
 CONTROLLER_NAMESPACE ?= secret-sync-system
 
@@ -91,11 +92,12 @@ integration-up: check-tools ## Create local k3d + vcluster + controller integrat
 	kubectl create namespace "$(SOURCE_NAMESPACE)" --dry-run=client -o yaml | kubectl apply -f -; \
 	KUBECONFIG="$(INTEGRATION_TMP_DIR)/$(VCLUSTER_NAME)-local.kubeconfig" kubectl create namespace "$(TARGET_NAMESPACE)" --dry-run=client -o yaml | KUBECONFIG="$(INTEGRATION_TMP_DIR)/$(VCLUSTER_NAME)-local.kubeconfig" kubectl apply -f -; \
 	kubectl create namespace "$(CLUSTER_TARGET_NAMESPACE)" --dry-run=client -o yaml | kubectl apply -f -; \
+	kubectl create namespace "$(CLUSTER_TARGET_NAMESPACE_2)" --dry-run=client -o yaml | kubectl apply -f -; \
 	kubectl -n "$(SOURCE_NAMESPACE)" create secret generic "$(SOURCE_SECRET_NAME)" \
 		--from-literal=username=appuser \
 		--from-literal=password=supersecret \
 		--dry-run=client -o yaml | kubectl apply -f -; \
-	TARGETS_JSON=$$(printf '[{"kind":"vcluster","vcluster":"%s","namespace":"%s"},{"kind":"cluster","namespace":"%s"}]' "$(VCLUSTER_NAME)" "$(TARGET_NAMESPACE)" "$(CLUSTER_TARGET_NAMESPACE)"); \
+	TARGETS_JSON=$$(printf '[{"kind":"vcluster","vcluster":"%s","namespace":"%s"},{"kind":"cluster","namespace":"%s"},{"kind":"cluster","namespace":"%s"}]' "$(VCLUSTER_NAME)" "$(TARGET_NAMESPACE)" "$(CLUSTER_TARGET_NAMESPACE)" "$(CLUSTER_TARGET_NAMESPACE_2)"); \
 	FORCE_TS=$$(date +%s); \
 	kubectl -n "$(SOURCE_NAMESPACE)" annotate secret "$(SOURCE_SECRET_NAME)" \
 		obegron.github.io/secret-sync-targets="$$TARGETS_JSON" \
@@ -136,6 +138,10 @@ integration-test: integration-up ## Run full integration test and validate synce
 	cluster_password=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$(SOURCE_SECRET_NAME)" -o jsonpath='{.data.password}' | base64 -d); \
 	[ "$$cluster_username" = "appuser" ]; \
 	[ "$$cluster_password" = "supersecret" ]; \
+	cluster2_username=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$(SOURCE_SECRET_NAME)" -o jsonpath='{.data.username}' | base64 -d); \
+	cluster2_password=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$(SOURCE_SECRET_NAME)" -o jsonpath='{.data.password}' | base64 -d); \
+	[ "$$cluster2_username" = "appuser" ]; \
+	[ "$$cluster2_password" = "supersecret" ]; \
 	reasons=$$(kubectl -n "$(SOURCE_NAMESPACE)" get events --field-selector involvedObject.kind=Secret,involvedObject.name="$(SOURCE_SECRET_NAME)" -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}'); \
 	echo "$$reasons" | grep -Eq 'SyncCreated|SyncUpdated'; \
 	pw_b64=$$(printf 'supersecret2' | base64 | tr -d '\n'); \
@@ -151,6 +157,8 @@ integration-test: integration-up ## Run full integration test and validate synce
 	[ "$$password2" = "supersecret2" ]; \
 	cluster_password2=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$(SOURCE_SECRET_NAME)" -o jsonpath='{.data.password}' | base64 -d); \
 	[ "$$cluster_password2" = "supersecret2" ]; \
+	cluster2_password2=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$(SOURCE_SECRET_NAME)" -o jsonpath='{.data.password}' | base64 -d); \
+	[ "$$cluster2_password2" = "supersecret2" ]; \
 	reasons2=$$(kubectl -n "$(SOURCE_NAMESPACE)" get events --field-selector involvedObject.kind=Secret,involvedObject.name="$(SOURCE_SECRET_NAME)" -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}'); \
 	echo "$$reasons2" | grep -q 'SyncUpdated'; \
 	echo "integration test passed"; \
