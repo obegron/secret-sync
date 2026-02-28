@@ -13,8 +13,8 @@ Example values override:
 
 ```yaml
 image:
-  repository: ghcr.io/obegron/secret-sync-controller
-  tag: v0.1.0
+  repository: docker.io/obegron/secret-sync-controller
+  tag: "0.1.0" # optional; defaults to chart appVersion
 
 controller:
   sourceNamespace: tenant-host-ns

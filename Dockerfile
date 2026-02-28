@@ -13,8 +13,9 @@ COPY cmd ./cmd
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
+ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w" -o /app/secret-sync-controller ./cmd/secret-sync-controller
+    go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" -o /app/secret-sync-controller ./cmd/secret-sync-controller
 
 FROM scratch
 WORKDIR /app

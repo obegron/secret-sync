@@ -129,6 +129,19 @@ helm upgrade --install secret-sync-controller \
   --create-namespace
 ```
 
+Version management:
+
+```bash
+make show-version
+make set-version VERSION=0.1.1
+```
+
+`set-version` updates:
+
+- `VERSION`
+- `charts/secret-sync-controller/Chart.yaml` `version`
+- `charts/secret-sync-controller/Chart.yaml` `appVersion`
+
 ## After Install
 
 Create required namespaces:

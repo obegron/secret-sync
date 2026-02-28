@@ -27,9 +27,9 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-const (
-	Version = "0.1.0"
+var Version = "dev"
 
+const (
 	controllerName = "secret-sync-controller"
 
 	labelSyncEnabled = "obegron.github.io/secret-sync-enabled"

@@ -1,7 +1,11 @@
 .DEFAULT_GOAL := build
 
 BINARY ?= secret-sync-controller
-VERSION := $(shell sed -n -E 's/^[[:space:]]*Version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' cmd/secret-sync-controller/main.go | head -n 1)
+VERSION_FILE ?= VERSION
+VERSION ?= $(shell cat $(VERSION_FILE))
+ifeq ($(strip $(VERSION)),)
+VERSION := $(shell cat $(VERSION_FILE))
+endif
 IMAGE_NAME ?= obegron/secret-sync-controller
 IMAGE ?= $(IMAGE_NAME):$(VERSION)
 PLATFORMS ?= linux/amd64,linux/arm64
@@ -22,7 +26,7 @@ CLUSTER_TARGET_NAMESPACE_2 ?= shared-runtime-2
 SOURCE_SECRET_NAME ?= app-db-secret
 CONTROLLER_NAMESPACE ?= secret-sync-system
 
-.PHONY: help tidy fmt vet build test docker-build-local docker-build docker-push show-version scan-image run clean check-tools integration-up integration-test integration-down
+.PHONY: help tidy fmt vet build test docker-build-local docker-build docker-push show-version set-version scan-image run clean check-tools integration-up integration-test integration-down
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "; print "Targets:"} /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -37,22 +41,29 @@ vet: ## Run go vet
 	go vet ./...
 
 build: ## Build controller binary (default)
-	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BINARY) ./cmd/secret-sync-controller
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.Version=$(VERSION)" -o $(BINARY) ./cmd/secret-sync-controller
 
 test: ## Run unit tests
 	go test ./...
 
 docker-build-local: ## Build local container image for current architecture
-	docker build -t $(IMAGE_NAME):$(VERSION) -t $(IMAGE_NAME):latest .
+	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE_NAME):$(VERSION) -t $(IMAGE_NAME):latest .
 
 docker-build: ## Build multi-arch container image (no push)
-	docker buildx build --platform $(PLATFORMS) -t $(IMAGE_NAME):$(VERSION) -t $(IMAGE_NAME):latest .
+	docker buildx build --platform $(PLATFORMS) --build-arg VERSION=$(VERSION) -t $(IMAGE_NAME):$(VERSION) -t $(IMAGE_NAME):latest .
 
 docker-push: ## Build and push multi-arch container image
-	docker buildx build --platform $(PLATFORMS) --provenance=true --sbom=true -t $(IMAGE_NAME):$(VERSION) -t $(IMAGE_NAME):latest . --push
+	docker buildx build --platform $(PLATFORMS) --build-arg VERSION=$(VERSION) --provenance=true --sbom=true -t $(IMAGE_NAME):$(VERSION) -t $(IMAGE_NAME):latest . --push
 
 show-version: ## Print application version
 	@echo $(VERSION)
+
+set-version: ## Set VERSION and sync chart version/appVersion (usage: make set-version VERSION=0.1.1)
+	@test -n "$(VERSION)" || { echo "VERSION is required"; exit 1; }
+	@printf '%s\n' "$(VERSION)" > "$(VERSION_FILE)"
+	@sed -E -i 's/^version: .*/version: $(VERSION)/' charts/secret-sync-controller/Chart.yaml
+	@sed -E -i 's/^appVersion: .*/appVersion: "$(VERSION)"/' charts/secret-sync-controller/Chart.yaml
+	@echo "Set version to $(VERSION)"
 
 scan-image: docker-build-local ## Scan local container image with Trivy
 	@mkdir -p .tmp/trivy-cache
@@ -67,7 +78,7 @@ scan-image: docker-build-local ## Scan local container image with Trivy
 		"$(IMAGE_NAME):$(VERSION)"
 
 run: ## Run controller locally
-	go run ./cmd/secret-sync-controller
+	go run -ldflags="-X main.Version=$(VERSION)" ./cmd/secret-sync-controller
 
 clean: ## Remove built binaries
 	rm -f $(BINARY)
