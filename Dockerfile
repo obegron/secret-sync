@@ -7,9 +7,9 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/vcluster-secret-sync-controller ./cmd/vcluster-secret-sync-controller
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/secret-sync-controller ./cmd/secret-sync-controller
 
 FROM gcr.io/distroless/static:nonroot
-COPY --from=build /out/vcluster-secret-sync-controller /usr/local/bin/vcluster-secret-sync-controller
+COPY --from=build /out/secret-sync-controller /usr/local/bin/secret-sync-controller
 USER nonroot:nonroot
-ENTRYPOINT ["/usr/local/bin/vcluster-secret-sync-controller"]
+ENTRYPOINT ["/usr/local/bin/secret-sync-controller"]

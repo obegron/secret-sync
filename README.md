@@ -1,17 +1,30 @@
-# vcluster-secret-sync-controller
+# secret-sync-controller
 
-Annotation-driven controller that syncs selected host-cluster Secrets into target vclusters.
+Annotation-driven controller that syncs selected host-cluster Secrets to one or many targets.
+
+Supported target kinds:
+
+- `vcluster`
+- `cluster`
 
 ## Source Secret contract
 
 Required label:
 
-- `obegron.github.io/sync-to-vcluster=true`
+- `obegron.github.io/secret-sync-enabled=true`
 
-Required annotations:
+Required annotation:
 
-- `obegron.github.io/vcluster-name=tenant-a-dev01`
-- `obegron.github.io/vcluster-namespace=app-runtime`
+- `obegron.github.io/secret-sync-targets` (JSON array)
+
+Example target annotation value:
+
+```json
+[
+  {"kind":"vcluster","vcluster":"tenant-a-dev01","namespace":"app-runtime"},
+  {"kind":"cluster","namespace":"shared-runtime"}
+]
+```
 
 Optional annotation:
 
@@ -27,19 +40,19 @@ Optional annotation:
 
 Vcluster kubeconfig files are resolved as:
 
-- `/etc/vcluster-kubeconfigs/tenant-a-dev01.kubeconfig`
+- `/etc/vcluster-kubeconfigs/<vcluster-name>.kubeconfig`
 
 ## Sync behavior
 
 - Copies secret `type`, `data`, and `immutable`.
 - Target secret name is same as source name.
 - Adds managed annotations:
-  - `obegron.github.io/managed-by=vcluster-secret-sync-controller`
-  - `obegron.github.io/source=tenant-host-ns/app-db-secret`
+  - `obegron.github.io/managed-by=secret-sync-controller`
+  - `obegron.github.io/source=<source-namespace>/<source-name>`
   - `obegron.github.io/checksum=<sha256>`
 - Updates only when checksum changes.
 - If target secret is immutable and content changes, controller recreates it.
-- On source delete, controller deletes target unless delete policy is `retain`.
+- On source delete, controller deletes targets unless delete policy is `retain`.
 
 ## Local integration test
 
@@ -49,8 +62,9 @@ Required commands:
 - `k3d`
 - `kubectl`
 - `helm`
+- `curl`
 
-Run full flow (cluster + kustomize-installed vcluster + controller + synced secret validation):
+Run full flow:
 
 ```bash
 make integration-test
@@ -64,18 +78,11 @@ make integration-down
 
 Defaults use:
 
-- k3d cluster: `vcluster-secret-sync-it`
+- k3d cluster: `secret-sync-it`
 - vcluster release: `tenant-a-dev01` in namespace `vcluster-tenant-a-dev01`
 - source secret: `tenant-host-ns/app-db-secret`
-- target namespace in vcluster: `app-runtime`
-
-Override any value with Make variables, for example:
-
-```bash
-make integration-test VCLUSTER_NAME=tenant-b-test02 TARGET_NAMESPACE=runtime
-```
-
-The vcluster install is rendered from [deploy/integration/vcluster/kustomization.yaml.tmpl](/home/egron/source/secret-sync/deploy/integration/vcluster/kustomization.yaml.tmpl) using Kustomize Helm support, matching a GitOps-style manifest workflow.
+- vcluster target namespace: `app-runtime`
+- cluster target namespace: `shared-runtime`
 
 ## License
 
@@ -83,4 +90,65 @@ Apache License 2.0. See `LICENSE`.
 
 ## Deploy
 
-See manifests in `deploy/`.
+Kustomize manifests:
+
+```bash
+kubectl apply -k deploy/base
+```
+
+Helm chart:
+
+```bash
+helm upgrade --install secret-sync-controller \
+  ./charts/secret-sync-controller \
+  --namespace secret-sync-system \
+  --create-namespace
+```
+
+## After Install
+
+Create required namespaces:
+
+```bash
+kubectl create namespace tenant-host-ns --dry-run=client -o yaml | kubectl apply -f -
+kubectl create namespace shared-runtime --dry-run=client -o yaml | kubectl apply -f -
+```
+
+Create the target namespace inside your vcluster:
+
+```bash
+KUBECONFIG=/path/to/tenant-a-dev01.kubeconfig \
+  kubectl create namespace app-runtime --dry-run=client -o yaml | \
+  KUBECONFIG=/path/to/tenant-a-dev01.kubeconfig kubectl apply -f -
+```
+
+Apply vcluster kubeconfig secret (controller reads vcluster kubeconfigs from this Secret):
+
+```bash
+kubectl apply -f deploy/examples/vcluster-kubeconfigs-secret.yaml
+```
+
+Apply a source Secret with multi-target sync (vcluster + host cluster):
+
+```bash
+kubectl apply -f deploy/examples/source-secret.yaml
+```
+
+Apply a source Secret with vcluster-only sync:
+
+```bash
+kubectl apply -f deploy/examples/source-secret-vcluster-only.yaml
+```
+
+Apply a source Secret with host-cluster-only sync:
+
+```bash
+kubectl apply -f deploy/examples/source-secret-cluster-only.yaml
+```
+
+Example manifests are in:
+
+- `deploy/examples/vcluster-kubeconfigs-secret.yaml`
+- `deploy/examples/source-secret.yaml`
+- `deploy/examples/source-secret-vcluster-only.yaml`
+- `deploy/examples/source-secret-cluster-only.yaml`

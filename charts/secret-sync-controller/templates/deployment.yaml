@@ -1,19 +1,19 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "vcluster-secret-sync-controller.fullname" . }}
+  name: {{ include "secret-sync-controller.fullname" . }}
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      app: {{ include "vcluster-secret-sync-controller.fullname" . }}
+      app: {{ include "secret-sync-controller.fullname" . }}
   template:
     metadata:
       labels:
-        app: {{ include "vcluster-secret-sync-controller.fullname" . }}
+        app: {{ include "secret-sync-controller.fullname" . }}
     spec:
-      serviceAccountName: {{ include "vcluster-secret-sync-controller.serviceAccountName" . }}
+      serviceAccountName: {{ include "secret-sync-controller.serviceAccountName" . }}
       containers:
         - name: controller
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"

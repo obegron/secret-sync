@@ -1,4 +1,4 @@
-module vcluster-secret-sync-controller
+module secret-sync-controller
 
 go 1.26.0
 

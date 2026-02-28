@@ -7,7 +7,7 @@ namespace:
 replicaCount: 1
 
 image:
-  repository: ghcr.io/company/vcluster-secret-sync-controller
+  repository: ghcr.io/company/secret-sync-controller
   tag: latest
   pullPolicy: IfNotPresent
 

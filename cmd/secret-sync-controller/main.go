@@ -27,20 +27,21 @@ import (
 )
 
 const (
-	controllerName = "vcluster-secret-sync-controller"
+	controllerName = "secret-sync-controller"
 
-	// Source selector and contract.
-	labelSyncEnabled = "obegron.github.io/sync-to-vcluster"
-
-	annVclusterName      = "obegron.github.io/vcluster-name"
-	annVclusterNamespace = "obegron.github.io/vcluster-namespace"
-	annDeletePolicy      = "obegron.github.io/delete-policy"
+	labelSyncEnabled = "obegron.github.io/secret-sync-enabled"
+	annSyncTargets   = "obegron.github.io/secret-sync-targets"
+	annDeletePolicy  = "obegron.github.io/delete-policy"
 
 	annManagedBy = "obegron.github.io/managed-by"
 	annSourceRef = "obegron.github.io/source"
 	annChecksum  = "obegron.github.io/checksum"
 
+	targetKindCluster  = "cluster"
+	targetKindVcluster = "vcluster"
+
 	eventReasonConfigInvalid = "SyncConfigInvalid"
+	eventReasonTargetInvalid = "SyncTargetInvalid"
 	eventReasonTargetMissing = "SyncTargetNamespaceMissing"
 	eventReasonCreated       = "SyncCreated"
 	eventReasonUpdated       = "SyncUpdated"
@@ -52,6 +53,19 @@ type runtimeConfig struct {
 	vclusterKubeconfigDir string
 	defaultDeletePolicy   string
 	metricsBindAddress    string
+}
+
+type syncTarget struct {
+	Kind      string `json:"kind"`
+	Namespace string `json:"namespace"`
+	Vcluster  string `json:"vcluster,omitempty"`
+}
+
+func (t syncTarget) ID() string {
+	if t.Kind == targetKindVcluster {
+		return fmt.Sprintf("vcluster/%s/%s", t.Vcluster, t.Namespace)
+	}
+	return fmt.Sprintf("cluster/%s", t.Namespace)
 }
 
 type controller struct {
@@ -165,17 +179,11 @@ func (c *controller) reconcile(ctx context.Context, src *corev1.Secret) error {
 	}
 	c.metrics.reconcileTotal.Add(1)
 
-	vclusterName := strings.TrimSpace(src.Annotations[annVclusterName])
-	targetNamespace := strings.TrimSpace(src.Annotations[annVclusterNamespace])
-	if vclusterName == "" || targetNamespace == "" {
-		msg := fmt.Sprintf("missing required annotations %s and/or %s", annVclusterName, annVclusterNamespace)
+	targets, err := parseTargets(src.Annotations[annSyncTargets])
+	if err != nil {
+		msg := fmt.Sprintf("invalid %s annotation: %v", annSyncTargets, err)
 		c.emitWarningEvent(ctx, src, eventReasonConfigInvalid, msg)
 		return errors.New(msg)
-	}
-
-	targetClient, err := c.vclusterClient(vclusterName)
-	if err != nil {
-		return fmt.Errorf("build vcluster client for %q: %w", vclusterName, err)
 	}
 
 	checksum, err := secretChecksum(src)
@@ -183,8 +191,35 @@ func (c *controller) reconcile(ctx context.Context, src *corev1.Secret) error {
 		return fmt.Errorf("compute checksum: %w", err)
 	}
 
+	var errs []string
+	for _, target := range targets {
+		if target.Kind == targetKindCluster && target.Namespace == src.Namespace {
+			msg := fmt.Sprintf("target %q points to source namespace %q and is not allowed", target.ID(), src.Namespace)
+			c.emitWarningEvent(ctx, src, eventReasonTargetInvalid, msg)
+			errs = append(errs, msg)
+			continue
+		}
+
+		if targetErr := c.reconcileTarget(ctx, src, target, checksum); targetErr != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", target.ID(), targetErr))
+		}
+	}
+
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
+	}
+
+	return nil
+}
+
+func (c *controller) reconcileTarget(ctx context.Context, src *corev1.Secret, target syncTarget, checksum string) error {
+	targetClient, err := c.targetClient(target)
+	if err != nil {
+		return err
+	}
+
 	targetName := src.Name
-	existing, err := targetClient.CoreV1().Secrets(targetNamespace).Get(ctx, targetName, metav1.GetOptions{})
+	existing, err := targetClient.CoreV1().Secrets(target.Namespace).Get(ctx, targetName, metav1.GetOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("get target secret: %w", err)
 	}
@@ -192,7 +227,7 @@ func (c *controller) reconcile(ctx context.Context, src *corev1.Secret) error {
 	desired := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      targetName,
-			Namespace: targetNamespace,
+			Namespace: target.Namespace,
 			Annotations: map[string]string{
 				annManagedBy: controllerName,
 				annSourceRef: fmt.Sprintf("%s/%s", src.Namespace, src.Name),
@@ -205,15 +240,15 @@ func (c *controller) reconcile(ctx context.Context, src *corev1.Secret) error {
 	}
 
 	if apierrors.IsNotFound(err) {
-		_, createErr := targetClient.CoreV1().Secrets(targetNamespace).Create(ctx, desired, metav1.CreateOptions{})
+		_, createErr := targetClient.CoreV1().Secrets(target.Namespace).Create(ctx, desired, metav1.CreateOptions{})
 		if apierrors.IsNotFound(createErr) {
-			msg := fmt.Sprintf("target namespace %q not found in vcluster %q", targetNamespace, vclusterName)
+			msg := fmt.Sprintf("target namespace %q not found for %q", target.Namespace, target.ID())
 			c.emitWarningEvent(ctx, src, eventReasonTargetMissing, msg)
 			return errors.New(msg)
 		}
 		if createErr == nil {
 			c.metrics.syncCreatedTotal.Add(1)
-			c.emitNormalEvent(ctx, src, eventReasonCreated, fmt.Sprintf("synced secret to %s/%s in vcluster %s", targetNamespace, targetName, vclusterName))
+			c.emitNormalEvent(ctx, src, eventReasonCreated, fmt.Sprintf("synced secret to %s", target.ID()))
 		}
 		return createErr
 	}
@@ -223,13 +258,13 @@ func (c *controller) reconcile(ctx context.Context, src *corev1.Secret) error {
 	}
 
 	if existing.Immutable != nil && *existing.Immutable {
-		if delErr := targetClient.CoreV1().Secrets(targetNamespace).Delete(ctx, targetName, metav1.DeleteOptions{}); delErr != nil {
+		if delErr := targetClient.CoreV1().Secrets(target.Namespace).Delete(ctx, targetName, metav1.DeleteOptions{}); delErr != nil {
 			return fmt.Errorf("delete immutable secret before recreate: %w", delErr)
 		}
-		_, createErr := targetClient.CoreV1().Secrets(targetNamespace).Create(ctx, desired, metav1.CreateOptions{})
+		_, createErr := targetClient.CoreV1().Secrets(target.Namespace).Create(ctx, desired, metav1.CreateOptions{})
 		if createErr == nil {
 			c.metrics.syncRecreatedTotal.Add(1)
-			c.emitNormalEvent(ctx, src, eventReasonUpdated, fmt.Sprintf("recreated immutable secret in %s/%s in vcluster %s", targetNamespace, targetName, vclusterName))
+			c.emitNormalEvent(ctx, src, eventReasonUpdated, fmt.Sprintf("recreated immutable secret in %s", target.ID()))
 		}
 		return createErr
 	}
@@ -238,12 +273,119 @@ func (c *controller) reconcile(ctx context.Context, src *corev1.Secret) error {
 	existing.Data = desired.Data
 	existing.Immutable = desired.Immutable
 	existing.Annotations = desired.Annotations
-	_, updateErr := targetClient.CoreV1().Secrets(targetNamespace).Update(ctx, existing, metav1.UpdateOptions{})
+	_, updateErr := targetClient.CoreV1().Secrets(target.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
 	if updateErr == nil {
 		c.metrics.syncUpdatedTotal.Add(1)
-		c.emitNormalEvent(ctx, src, eventReasonUpdated, fmt.Sprintf("updated synced secret in %s/%s in vcluster %s", targetNamespace, targetName, vclusterName))
+		c.emitNormalEvent(ctx, src, eventReasonUpdated, fmt.Sprintf("updated synced secret in %s", target.ID()))
 	}
 	return updateErr
+}
+
+func (c *controller) handleDelete(ctx context.Context, src *corev1.Secret) error {
+	if src.Labels[labelSyncEnabled] != "true" {
+		return nil
+	}
+	c.metrics.deleteTotal.Add(1)
+
+	deletePolicy := normalizeDeletePolicy(src.Annotations[annDeletePolicy])
+	if deletePolicy == "" {
+		deletePolicy = c.cfg.defaultDeletePolicy
+	}
+	if deletePolicy == "retain" {
+		return nil
+	}
+
+	targets, err := parseTargets(src.Annotations[annSyncTargets])
+	if err != nil {
+		return nil
+	}
+
+	var errs []string
+	for _, target := range targets {
+		if target.Kind == targetKindCluster && target.Namespace == src.Namespace {
+			continue
+		}
+
+		targetClient, targetErr := c.targetClient(target)
+		if targetErr != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", target.ID(), targetErr))
+			continue
+		}
+
+		delErr := targetClient.CoreV1().Secrets(target.Namespace).Delete(ctx, src.Name, metav1.DeleteOptions{})
+		if delErr == nil {
+			c.metrics.syncDeletedTotal.Add(1)
+			continue
+		}
+		if !apierrors.IsNotFound(delErr) {
+			errs = append(errs, fmt.Sprintf("%s: %v", target.ID(), delErr))
+		}
+	}
+
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
+	}
+
+	return nil
+}
+
+func (c *controller) targetClient(target syncTarget) (kubernetes.Interface, error) {
+	switch target.Kind {
+	case targetKindCluster:
+		return c.hostClient, nil
+	case targetKindVcluster:
+		return c.vclusterClient(target.Vcluster)
+	default:
+		return nil, fmt.Errorf("unsupported target kind %q", target.Kind)
+	}
+}
+
+func parseTargets(raw string) ([]syncTarget, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, errors.New("annotation is required and must be a JSON array")
+	}
+
+	var targets []syncTarget
+	if err := json.Unmarshal([]byte(raw), &targets); err != nil {
+		return nil, fmt.Errorf("parse JSON: %w", err)
+	}
+	if len(targets) == 0 {
+		return nil, errors.New("at least one target is required")
+	}
+
+	seen := map[string]struct{}{}
+	result := make([]syncTarget, 0, len(targets))
+
+	for i, t := range targets {
+		t.Kind = strings.ToLower(strings.TrimSpace(t.Kind))
+		t.Namespace = strings.TrimSpace(t.Namespace)
+		t.Vcluster = strings.TrimSpace(t.Vcluster)
+
+		if t.Namespace == "" {
+			return nil, fmt.Errorf("target[%d]: namespace is required", i)
+		}
+		switch t.Kind {
+		case targetKindCluster:
+			if t.Vcluster != "" {
+				return nil, fmt.Errorf("target[%d]: vcluster must be empty for kind=cluster", i)
+			}
+		case targetKindVcluster:
+			if t.Vcluster == "" {
+				return nil, fmt.Errorf("target[%d]: vcluster is required for kind=vcluster", i)
+			}
+		default:
+			return nil, fmt.Errorf("target[%d]: unsupported kind %q", i, t.Kind)
+		}
+
+		if _, ok := seen[t.ID()]; ok {
+			continue
+		}
+		seen[t.ID()] = struct{}{}
+		result = append(result, t)
+	}
+
+	return result, nil
 }
 
 func (c *controller) emitWarningEvent(ctx context.Context, src *corev1.Secret, reason, message string) {
@@ -291,39 +433,13 @@ func (c *controller) emitEvent(ctx context.Context, src *corev1.Secret, eventTyp
 	}
 }
 
-func (c *controller) handleDelete(ctx context.Context, src *corev1.Secret) error {
-	if src.Labels[labelSyncEnabled] != "true" {
-		return nil
-	}
-
-	deletePolicy := normalizeDeletePolicy(src.Annotations[annDeletePolicy])
-	if deletePolicy == "" {
-		deletePolicy = c.cfg.defaultDeletePolicy
-	}
-	if deletePolicy == "retain" {
-		return nil
-	}
-
-	vclusterName := strings.TrimSpace(src.Annotations[annVclusterName])
-	targetNamespace := strings.TrimSpace(src.Annotations[annVclusterNamespace])
-	if vclusterName == "" || targetNamespace == "" {
-		return nil
-	}
-
-	targetClient, err := c.vclusterClient(vclusterName)
+func (c *controller) vclusterClient(vclusterName string) (kubernetes.Interface, error) {
+	kubeconfig := filepath.Join(c.cfg.vclusterKubeconfigDir, fmt.Sprintf("%s.kubeconfig", vclusterName))
+	restCfg, err := loadConfig(kubeconfig)
 	if err != nil {
-		return fmt.Errorf("build vcluster client for %q: %w", vclusterName, err)
+		return nil, err
 	}
-
-	err = targetClient.CoreV1().Secrets(targetNamespace).Delete(ctx, src.Name, metav1.DeleteOptions{})
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	if err == nil {
-		c.metrics.deleteTotal.Add(1)
-		c.metrics.syncDeletedTotal.Add(1)
-	}
-	return err
+	return kubernetes.NewForConfig(restCfg)
 }
 
 func (c *controller) serveHTTP(ctx context.Context) {
@@ -375,15 +491,6 @@ func (c *controller) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintf(w, "secret_sync_event_normal_total %d\n", c.metrics.eventNormalTotal.Load())
 	fmt.Fprintf(w, "secret_sync_event_warning_total %d\n", c.metrics.eventWarningTotal.Load())
 	fmt.Fprintf(w, "secret_sync_event_error_total %d\n", c.metrics.eventErrorTotal.Load())
-}
-
-func (c *controller) vclusterClient(vclusterName string) (kubernetes.Interface, error) {
-	kubeconfig := filepath.Join(c.cfg.vclusterKubeconfigDir, fmt.Sprintf("%s.kubeconfig", vclusterName))
-	restCfg, err := loadConfig(kubeconfig)
-	if err != nil {
-		return nil, err
-	}
-	return kubernetes.NewForConfig(restCfg)
 }
 
 func loadConfig(kubeconfig string) (*rest.Config, error) {

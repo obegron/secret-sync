@@ -1,18 +1,18 @@
-{{- define "vcluster-secret-sync-controller.name" -}}
+{{- define "secret-sync-controller.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "vcluster-secret-sync-controller.fullname" -}}
+{{- define "secret-sync-controller.fullname" -}}
 {{- if .Values.fullnameOverride -}}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
 {{- else -}}
-{{- include "vcluster-secret-sync-controller.name" . -}}
+{{- include "secret-sync-controller.name" . -}}
 {{- end -}}
 {{- end -}}
 
-{{- define "vcluster-secret-sync-controller.serviceAccountName" -}}
+{{- define "secret-sync-controller.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
-{{- default (include "vcluster-secret-sync-controller.fullname" .) .Values.serviceAccount.name -}}
+{{- default (include "secret-sync-controller.fullname" .) .Values.serviceAccount.name -}}
 {{- else -}}
 {{- default "default" .Values.serviceAccount.name -}}
 {{- end -}}
