@@ -182,24 +182,26 @@ integration-test-pull: integration-up ## Run pull-mode integration test with sta
 	kubectl -n "$(CONTROLLER_NAMESPACE)" rollout status deployment/secret-sync-controller --timeout=180s; \
 	printf '%s\n' '{"issuer":"https://kubernetes.default.svc","jwks_uri":"https://placeholder.invalid/openid/v1/jwks","response_types_supported":["id_token"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]}' > "$(INTEGRATION_TMP_DIR)/static-oidc-config.json"; \
 	printf '%s\n' '{"keys":[]}' > "$(INTEGRATION_TMP_DIR)/static-jwks.json"; \
-	ENVIRONMENT_BASE_URL="http://127.0.0.1:19090" \
+	OIDC_HELPER_PORT=19191; \
+	ENVIRONMENT_BASE_URL="http://127.0.0.1:$$OIDC_HELPER_PORT" \
 	OIDC_MODE=static \
-	PORT=19090 \
+	PORT=$$OIDC_HELPER_PORT \
 	STATIC_OIDC_CONFIG_FILE="$(INTEGRATION_TMP_DIR)/static-oidc-config.json" \
 	STATIC_JWKS_FILE="$(INTEGRATION_TMP_DIR)/static-jwks.json" \
 	go run -ldflags="-X main.Version=$(VERSION)" ./cmd/oidc-helper > "$(INTEGRATION_TMP_DIR)/oidc-helper.log" 2>&1 & \
 	OIDC_PID=$$!; \
 	trap 'kill $$OIDC_PID >/dev/null 2>&1 || true' EXIT; \
 	for i in $$(seq 1 20); do \
-		if curl -fsS http://127.0.0.1:19090/health >/dev/null 2>&1; then \
+		if curl -fsS "http://127.0.0.1:$$OIDC_HELPER_PORT/health" >/dev/null 2>&1; then \
 			break; \
 		fi; \
 		sleep 1; \
 	done; \
-	curl -fsS http://127.0.0.1:19090/health >/dev/null; \
-	curl -fsS http://127.0.0.1:19090/.well-known/openid-configuration > "$(INTEGRATION_TMP_DIR)/served-oidc-config.json"; \
-	grep -q 'http://127.0.0.1:19090/openid/v1/jwks' "$(INTEGRATION_TMP_DIR)/served-oidc-config.json"; \
-	curl -fsS http://127.0.0.1:19090/openid/v1/jwks | grep -q '"keys"'; \
+	curl -fsS "http://127.0.0.1:$$OIDC_HELPER_PORT/health" >/dev/null; \
+	curl -fsS "http://127.0.0.1:$$OIDC_HELPER_PORT/.well-known/openid-configuration" > "$(INTEGRATION_TMP_DIR)/served-oidc-config.json"; \
+	grep -q '"issuer":"https://kubernetes.default.svc"' "$(INTEGRATION_TMP_DIR)/served-oidc-config.json"; \
+	grep -q "\"jwks_uri\":\"http://127.0.0.1:$$OIDC_HELPER_PORT/openid/v1/jwks\"" "$(INTEGRATION_TMP_DIR)/served-oidc-config.json"; \
+	curl -fsS "http://127.0.0.1:$$OIDC_HELPER_PORT/openid/v1/jwks" | grep -q '"keys"'; \
 	PULL_SECRET_NAME="$(SOURCE_SECRET_NAME)-pull"; \
 	kubectl -n "$(SOURCE_NAMESPACE)" delete secret "$$PULL_SECRET_NAME" --ignore-not-found; \
 	kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" delete secret "$$PULL_SECRET_NAME" --ignore-not-found; \
