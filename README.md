@@ -35,7 +35,7 @@ Optional annotation:
 - `SOURCE_NAMESPACE`
 - `TARGET_NAMESPACE` (used by `pull` mode; if unset, defaults to `POD_NAMESPACE`)
 - `HOST_API_SERVER` (used by `pull` mode when `HOST_KUBECONFIG` is not set; if empty, falls back to in-cluster host API config)
-- `HOST_TOKEN_FILE` (used by `pull` mode, default serviceaccount token path)
+- `HOST_TOKEN_FILE` (used by `pull` mode, default serviceaccount token path; token is re-read by client-go for rotation)
 - `HOST_CA_FILE` (used by `pull` mode, default serviceaccount CA path)
 - `DEFAULT_DELETE_POLICY` (`delete` or `retain`, default `delete`)
 - `TENANT_SAFE_MODE` (`true|false`, default `false`; pull mode only)
@@ -57,6 +57,7 @@ Optional annotation:
 
 - `push`: watches source Secrets and syncs to `kind=cluster` targets only
 - `pull`: watches source Secrets and mirrors to one local namespace; `secret-sync-targets` is ignored
+  - pull reconcile/delete is processed via a rate-limited queue and transient failures are retried
 
 ## Security modes
 
