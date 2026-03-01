@@ -37,7 +37,7 @@ spec:
               value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
             - name: DEFAULT_DELETE_POLICY
               value: delete
-            - name: TENANT_SAFE_MODE
+            - name: PULL_NAMESPACE_ISOLATION
               value: "false"
             - name: ALLOWED_SYNC_TARGETS
               value: ""

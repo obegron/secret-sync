@@ -38,8 +38,8 @@ Optional annotation:
 - `HOST_TOKEN_FILE` (used by `pull` mode, default serviceaccount token path; token is re-read by client-go for rotation)
 - `HOST_CA_FILE` (used by `pull` mode, default serviceaccount CA path)
 - `DEFAULT_DELETE_POLICY` (`delete` or `retain`, default `delete`)
-- `TENANT_SAFE_MODE` (`true|false`, default `false`; pull mode only)
-- `ALLOWED_SYNC_TARGETS` (optional JSON array allowlist, push mode)
+- `PULL_NAMESPACE_ISOLATION` (`true|false`, default `false`; pull mode only)
+- `ALLOWED_SYNC_TARGETS` (optional JSON array allowlist; applies to push targets and pull targets)
 - `METRICS_BIND_ADDRESS` (default `:8080`; serves `/healthz`, `/readyz`, `/version`, `/metrics`)
 
 ## Sync behavior
@@ -56,17 +56,19 @@ Optional annotation:
 ## Runtime modes
 
 - `push`: watches source Secrets and syncs to `kind=cluster` targets only
-- `pull`: watches source Secrets and mirrors to one local namespace; `secret-sync-targets` is ignored
+- `pull`: watches source Secrets and mirrors into local-cluster target namespaces
   - pull reconcile/delete is processed via a rate-limited queue and transient failures are retried
+  - if `secret-sync-targets` annotation is set on source Secret, pull mode uses those `kind=cluster` target namespaces in the local cluster
+  - `TARGET_NAMESPACE` remains the fallback when annotation is not set
 
 ## Security modes
 
-Tenant-safe mode (`TENANT_SAFE_MODE=true`):
+Namespace isolation mode (`PULL_NAMESPACE_ISOLATION=true`):
 
 - intended for pull mode
 - scopes source to pod namespace when `SOURCE_NAMESPACE` is unset
 
-Platform mode (`TENANT_SAFE_MODE=false`):
+Platform mode (`PULL_NAMESPACE_ISOLATION=false`):
 
 - set `SOURCE_NAMESPACE` and/or `ALLOWED_SYNC_TARGETS` to constrain blast radius
 

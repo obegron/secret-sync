@@ -174,13 +174,13 @@ integration-test: integration-up ## Run full integration test and validate synce
 integration-test-pull: integration-up ## Run pull-mode integration test with static OIDC helper
 	@set -euo pipefail; \
 	mkdir -p "$(INTEGRATION_TMP_DIR)"; \
-	kubectl -n "$(CONTROLLER_NAMESPACE)" set env deployment/secret-sync-controller \
-		SYNC_MODE=pull \
-		SOURCE_NAMESPACE="$(SOURCE_NAMESPACE)" \
-		TARGET_NAMESPACE="$(CLUSTER_TARGET_NAMESPACE)" \
-		HOST_API_SERVER="" \
-		TENANT_SAFE_MODE=false \
-		ALLOWED_SYNC_TARGETS=""; \
+		kubectl -n "$(CONTROLLER_NAMESPACE)" set env deployment/secret-sync-controller \
+			SYNC_MODE=pull \
+			SOURCE_NAMESPACE="$(SOURCE_NAMESPACE)" \
+			TARGET_NAMESPACE="$(CLUSTER_TARGET_NAMESPACE)" \
+			HOST_API_SERVER="" \
+			PULL_NAMESPACE_ISOLATION=false \
+			ALLOWED_SYNC_TARGETS=""; \
 	kubectl -n "$(CONTROLLER_NAMESPACE)" rollout status deployment/secret-sync-controller --timeout=180s; \
 	printf '%s\n' '{"issuer":"https://kubernetes.default.svc","jwks_uri":"https://placeholder.invalid/openid/v1/jwks","response_types_supported":["id_token"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]}' > "$(INTEGRATION_TMP_DIR)/static-oidc-config.json"; \
 	printf '%s\n' '{"keys":[]}' > "$(INTEGRATION_TMP_DIR)/static-jwks.json"; \
@@ -212,37 +212,50 @@ integration-test-pull: integration-up ## Run pull-mode integration test with sta
 		--from-literal=password=pullsecret \
 		--dry-run=client -o yaml | kubectl apply -f -; \
 	kubectl -n "$(SOURCE_NAMESPACE)" patch secret "$$PULL_SECRET_NAME" --type merge -p '{"metadata":{"labels":{"obegron.github.io/secret-sync-enabled":"true"}}}'; \
+	PULL_TARGETS_JSON=$$(printf '[{"kind":"cluster","namespace":"%s"},{"kind":"cluster","namespace":"%s"}]' "$(CLUSTER_TARGET_NAMESPACE)" "$(CLUSTER_TARGET_NAMESPACE_2)"); \
+	kubectl -n "$(SOURCE_NAMESPACE)" annotate secret "$$PULL_SECRET_NAME" obegron.github.io/secret-sync-targets="$$PULL_TARGETS_JSON" --overwrite; \
 	kubectl -n "$(SOURCE_NAMESPACE)" annotate secret "$$PULL_SECRET_NAME" obegron.github.io/delete-policy=delete --overwrite; \
 	for i in $$(seq 1 30); do \
-		if kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" >/dev/null 2>&1; then \
+		if kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" >/dev/null 2>&1 && \
+		   kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PULL_SECRET_NAME" >/dev/null 2>&1; then \
 			break; \
 		fi; \
 		sleep 2; \
 	done; \
 	kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" >/dev/null; \
+	kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PULL_SECRET_NAME" >/dev/null; \
 	pull_user=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.username}' | base64 -d); \
 	pull_pw=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d); \
+	pull_user2=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.username}' | base64 -d); \
+	pull_pw2=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d); \
 	[ "$$pull_user" = "pulluser" ]; \
 	[ "$$pull_pw" = "pullsecret" ]; \
+	[ "$$pull_user2" = "pulluser" ]; \
+	[ "$$pull_pw2" = "pullsecret" ]; \
 	pw_b64=$$(printf 'pullsecret2' | base64 | tr -d '\n'); \
 	kubectl -n "$(SOURCE_NAMESPACE)" patch secret "$$PULL_SECRET_NAME" --type merge -p "{\"data\":{\"password\":\"$$pw_b64\"}}"; \
 	for i in $$(seq 1 30); do \
 		pull_pw2=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d 2>/dev/null || true); \
-		if [ "$$pull_pw2" = "pullsecret2" ]; then \
+		pull_pw3=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d 2>/dev/null || true); \
+		if [ "$$pull_pw2" = "pullsecret2" ] && [ "$$pull_pw3" = "pullsecret2" ]; then \
 			break; \
 		fi; \
 		sleep 2; \
 	done; \
 	pull_pw2=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d); \
+	pull_pw3=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d); \
 	[ "$$pull_pw2" = "pullsecret2" ]; \
+	[ "$$pull_pw3" = "pullsecret2" ]; \
 	kubectl -n "$(SOURCE_NAMESPACE)" delete secret "$$PULL_SECRET_NAME"; \
 	for i in $$(seq 1 30); do \
-		if ! kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" >/dev/null 2>&1; then \
+		if ! kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" >/dev/null 2>&1 && \
+		   ! kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PULL_SECRET_NAME" >/dev/null 2>&1; then \
 			break; \
 		fi; \
 		sleep 2; \
 	done; \
 	! kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" >/dev/null 2>&1; \
+	! kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PULL_SECRET_NAME" >/dev/null 2>&1; \
 	echo "integration pull test passed"; \
 	kill $$OIDC_PID >/dev/null 2>&1 || true; \
 	trap - EXIT

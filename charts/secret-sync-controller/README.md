@@ -20,7 +20,7 @@ controller:
   syncMode: push
   sourceNamespace: tenant-host-ns
   defaultDeletePolicy: delete
-  tenantSafeMode: false
+  pullNamespaceIsolation: false
   allowedSyncTargets: '[{"kind":"cluster","namespace":"shared-runtime"}]'
 ```
 

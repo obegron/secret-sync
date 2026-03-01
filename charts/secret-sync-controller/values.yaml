@@ -26,7 +26,7 @@ controller:
   hostTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
   hostCAFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
   defaultDeletePolicy: delete
-  tenantSafeMode: false
+  pullNamespaceIsolation: false
   allowedSyncTargets: ""
   metricsBindAddress: :8080
 

@@ -52,17 +52,17 @@ const (
 )
 
 type runtimeConfig struct {
-	syncMode            string
-	hostKubeconfig      string
-	hostAPIServer       string
-	hostTokenFile       string
-	hostCAFile          string
-	podNamespace        string
-	sourceNamespace     string
-	targetNamespace     string
-	defaultDeletePolicy string
-	metricsBindAddress  string
-	tenantSafeMode      bool
+	syncMode               string
+	hostKubeconfig         string
+	hostAPIServer          string
+	hostTokenFile          string
+	hostCAFile             string
+	podNamespace           string
+	sourceNamespace        string
+	targetNamespace        string
+	defaultDeletePolicy    string
+	metricsBindAddress     string
+	pullNamespaceIsolation bool
 }
 
 type syncTarget struct {
@@ -119,22 +119,22 @@ func main() {
 		log.Fatalf("invalid SYNC_MODE %q (expected %q or %q)", syncMode, modePush, modePull)
 	}
 
-	tenantSafeMode, err := parseBoolEnv("TENANT_SAFE_MODE", false)
+	pullNamespaceIsolation, err := parseBoolEnv("PULL_NAMESPACE_ISOLATION", false)
 	if err != nil {
-		log.Fatalf("invalid TENANT_SAFE_MODE: %v", err)
+		log.Fatalf("invalid PULL_NAMESPACE_ISOLATION: %v", err)
 	}
 
 	podNamespace := strings.TrimSpace(os.Getenv("POD_NAMESPACE"))
 	sourceNamespace := strings.TrimSpace(os.Getenv("SOURCE_NAMESPACE"))
-	if sourceNamespace == "" && tenantSafeMode {
+	if sourceNamespace == "" && pullNamespaceIsolation {
 		sourceNamespace = podNamespace
 	}
 
-	if tenantSafeMode && sourceNamespace == "" {
-		log.Fatal("TENANT_SAFE_MODE requires SOURCE_NAMESPACE (or POD_NAMESPACE)")
+	if pullNamespaceIsolation && sourceNamespace == "" {
+		log.Fatal("PULL_NAMESPACE_ISOLATION requires SOURCE_NAMESPACE (or POD_NAMESPACE)")
 	}
-	if tenantSafeMode && podNamespace != "" && sourceNamespace != podNamespace {
-		log.Fatalf("TENANT_SAFE_MODE requires SOURCE_NAMESPACE (%q) to match POD_NAMESPACE (%q)", sourceNamespace, podNamespace)
+	if pullNamespaceIsolation && podNamespace != "" && sourceNamespace != podNamespace {
+		log.Fatalf("PULL_NAMESPACE_ISOLATION requires SOURCE_NAMESPACE (%q) to match POD_NAMESPACE (%q)", sourceNamespace, podNamespace)
 	}
 
 	allowedTargetIDs, err := parseAllowedTargetIDs(os.Getenv("ALLOWED_SYNC_TARGETS"))
@@ -143,17 +143,17 @@ func main() {
 	}
 
 	cfg := runtimeConfig{
-		syncMode:            syncMode,
-		hostKubeconfig:      os.Getenv("HOST_KUBECONFIG"),
-		hostAPIServer:       strings.TrimSpace(os.Getenv("HOST_API_SERVER")),
-		hostTokenFile:       envOrDefault("HOST_TOKEN_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/token"),
-		hostCAFile:          envOrDefault("HOST_CA_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"),
-		podNamespace:        podNamespace,
-		sourceNamespace:     sourceNamespace,
-		targetNamespace:     strings.TrimSpace(os.Getenv("TARGET_NAMESPACE")),
-		defaultDeletePolicy: normalizeDeletePolicy(envOrDefault("DEFAULT_DELETE_POLICY", "delete")),
-		metricsBindAddress:  envOrDefault("METRICS_BIND_ADDRESS", ":8080"),
-		tenantSafeMode:      tenantSafeMode,
+		syncMode:               syncMode,
+		hostKubeconfig:         os.Getenv("HOST_KUBECONFIG"),
+		hostAPIServer:          strings.TrimSpace(os.Getenv("HOST_API_SERVER")),
+		hostTokenFile:          envOrDefault("HOST_TOKEN_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/token"),
+		hostCAFile:             envOrDefault("HOST_CA_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"),
+		podNamespace:           podNamespace,
+		sourceNamespace:        sourceNamespace,
+		targetNamespace:        strings.TrimSpace(os.Getenv("TARGET_NAMESPACE")),
+		defaultDeletePolicy:    normalizeDeletePolicy(envOrDefault("DEFAULT_DELETE_POLICY", "delete")),
+		metricsBindAddress:     envOrDefault("METRICS_BIND_ADDRESS", ":8080"),
+		pullNamespaceIsolation: pullNamespaceIsolation,
 	}
 	if cfg.targetNamespace == "" {
 		cfg.targetNamespace = cfg.podNamespace
@@ -163,6 +163,13 @@ func main() {
 	}
 	if cfg.syncMode == modePull && strings.TrimSpace(cfg.targetNamespace) == "" {
 		log.Fatal("SYNC_MODE=pull requires TARGET_NAMESPACE or POD_NAMESPACE")
+	}
+
+	if cfg.syncMode == modePull && cfg.sourceNamespace == cfg.targetNamespace {
+		// If HOST_API_SERVER is empty and HOST_KUBECONFIG is empty, it's definitely the same cluster.
+		if cfg.hostAPIServer == "" && cfg.hostKubeconfig == "" {
+			log.Fatalf("invalid configuration: SOURCE_NAMESPACE and TARGET_NAMESPACE cannot be the same (%q) when running in pull mode on the same cluster", cfg.sourceNamespace)
+		}
 	}
 
 	var hostRest *rest.Config
@@ -447,14 +454,32 @@ func (c *controller) reconcilePull(ctx context.Context, src *corev1.Secret) erro
 	}
 	c.metrics.reconcileTotal.Add(1)
 
+	targets, err := c.resolvePullTargets(src)
+	if err != nil {
+		msg := fmt.Sprintf("invalid pull targets for %s/%s: %v", src.Namespace, src.Name, err)
+		c.emitWarningEvent(ctx, src, eventReasonConfigInvalid, msg)
+		return errors.New(msg)
+	}
+
 	checksum, err := secretChecksum(src)
 	if err != nil {
 		return fmt.Errorf("compute checksum: %w", err)
 	}
 
-	targetID := fmt.Sprintf("cluster/%s", c.cfg.targetNamespace)
-	if err := c.reconcileIntoNamespace(ctx, c.localClient, src, c.cfg.targetNamespace, targetID, checksum); err != nil {
-		return err
+	var errs []string
+	for _, target := range targets {
+		if targetErr := c.validatePullTarget(src, target); targetErr != nil {
+			c.emitWarningEvent(ctx, src, eventReasonTargetBlocked, targetErr.Error())
+			errs = append(errs, targetErr.Error())
+			continue
+		}
+		if targetErr := c.reconcileIntoNamespace(ctx, c.localClient, src, target.Namespace, target.ID(), checksum); targetErr != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", target.ID(), targetErr))
+		}
+	}
+
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
 	}
 
 	return nil
@@ -619,31 +644,49 @@ func (c *controller) handleDeletePull(ctx context.Context, src *corev1.Secret) e
 		return nil
 	}
 
-	existing, err := c.localClient.CoreV1().Secrets(c.cfg.targetNamespace).Get(ctx, src.Name, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
+	targets, err := c.resolvePullTargets(src)
 	if err != nil {
-		return err
-	}
-
-	expectedSourceRef := fmt.Sprintf("%s/%s", src.Namespace, src.Name)
-	if err := ensureManagedTarget(existing, expectedSourceRef); err != nil {
-		msg := fmt.Sprintf("target %q ownership conflict: %v", fmt.Sprintf("cluster/%s", c.cfg.targetNamespace), err)
-		c.emitWarningEvent(ctx, src, eventReasonTargetOwned, msg)
-		return errors.New(msg)
-	}
-
-	delErr := c.localClient.CoreV1().Secrets(c.cfg.targetNamespace).Delete(ctx, src.Name, metav1.DeleteOptions{})
-	if delErr == nil {
-		c.metrics.syncDeletedTotal.Add(1)
-		return nil
-	}
-	if apierrors.IsNotFound(delErr) {
 		return nil
 	}
 
-	return delErr
+	var errs []string
+	for _, target := range targets {
+		if targetErr := c.validatePullTarget(src, target); targetErr != nil {
+			continue
+		}
+
+		existing, getErr := c.localClient.CoreV1().Secrets(target.Namespace).Get(ctx, src.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(getErr) {
+			continue
+		}
+		if getErr != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", target.ID(), getErr))
+			continue
+		}
+
+		expectedSourceRef := fmt.Sprintf("%s/%s", src.Namespace, src.Name)
+		if err := ensureManagedTarget(existing, expectedSourceRef); err != nil {
+			msg := fmt.Sprintf("target %q ownership conflict: %v", target.ID(), err)
+			c.emitWarningEvent(ctx, src, eventReasonTargetOwned, msg)
+			errs = append(errs, msg)
+			continue
+		}
+
+		delErr := c.localClient.CoreV1().Secrets(target.Namespace).Delete(ctx, src.Name, metav1.DeleteOptions{})
+		if delErr == nil {
+			c.metrics.syncDeletedTotal.Add(1)
+			continue
+		}
+		if !apierrors.IsNotFound(delErr) {
+			errs = append(errs, fmt.Sprintf("%s: %v", target.ID(), delErr))
+		}
+	}
+
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
+	}
+
+	return nil
 }
 
 func (c *controller) validateTargetForSource(src *corev1.Secret, target syncTarget) error {
@@ -654,8 +697,8 @@ func (c *controller) validateTargetForSource(src *corev1.Secret, target syncTarg
 		return fmt.Errorf("target %q points to source namespace %q and is not allowed", target.ID(), src.Namespace)
 	}
 
-	if c.cfg.tenantSafeMode {
-		return fmt.Errorf("target %q is blocked: TENANT_SAFE_MODE is only supported in pull mode", target.ID())
+	if c.cfg.pullNamespaceIsolation {
+		return fmt.Errorf("target %q is blocked: PULL_NAMESPACE_ISOLATION is only supported in pull mode", target.ID())
 	}
 
 	if len(c.allowedTargetIDs) > 0 {
@@ -664,6 +707,37 @@ func (c *controller) validateTargetForSource(src *corev1.Secret, target syncTarg
 		}
 	}
 
+	return nil
+}
+
+func (c *controller) resolvePullTargets(src *corev1.Secret) ([]syncTarget, error) {
+	raw := strings.TrimSpace(src.Annotations[annSyncTargets])
+	if raw == "" {
+		return []syncTarget{{Kind: targetKindCluster, Namespace: c.cfg.targetNamespace}}, nil
+	}
+	return parseTargets(raw)
+}
+
+func (c *controller) validatePullTarget(src *corev1.Secret, target syncTarget) error {
+	if target.Kind != targetKindCluster {
+		return fmt.Errorf("target %q is blocked: pull mode only allows kind=%s", target.ID(), targetKindCluster)
+	}
+	if c.cfg.pullNamespaceIsolation {
+		if c.cfg.podNamespace == "" {
+			return fmt.Errorf("target %q is blocked: PULL_NAMESPACE_ISOLATION requires POD_NAMESPACE", target.ID())
+		}
+		if target.Namespace != c.cfg.podNamespace {
+			return fmt.Errorf("target %q is blocked: PULL_NAMESPACE_ISOLATION only allows namespace %q", target.ID(), c.cfg.podNamespace)
+		}
+	}
+	if c.cfg.hostKubeconfig == "" && c.cfg.hostAPIServer == "" && target.Namespace == src.Namespace {
+		return fmt.Errorf("target %q points to source namespace %q and is not allowed in same-cluster pull mode", target.ID(), src.Namespace)
+	}
+	if len(c.allowedTargetIDs) > 0 {
+		if _, ok := c.allowedTargetIDs[target.ID()]; !ok {
+			return fmt.Errorf("target %q is blocked by ALLOWED_SYNC_TARGETS", target.ID())
+		}
+	}
 	return nil
 }
 

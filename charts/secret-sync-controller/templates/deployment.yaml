@@ -37,8 +37,8 @@ spec:
               value: {{ .Values.controller.hostCAFile | quote }}
             - name: DEFAULT_DELETE_POLICY
               value: {{ .Values.controller.defaultDeletePolicy | quote }}
-            - name: TENANT_SAFE_MODE
-              value: {{ .Values.controller.tenantSafeMode | quote }}
+            - name: PULL_NAMESPACE_ISOLATION
+              value: {{ .Values.controller.pullNamespaceIsolation | quote }}
             - name: ALLOWED_SYNC_TARGETS
               value: {{ .Values.controller.allowedSyncTargets | quote }}
             - name: METRICS_BIND_ADDRESS
