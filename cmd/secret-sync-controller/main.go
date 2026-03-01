@@ -11,9 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"syscall"
 
@@ -31,6 +29,8 @@ var Version = "dev"
 
 const (
 	controllerName = "secret-sync-controller"
+	modePush       = "push"
+	modePull       = "pull"
 
 	labelSyncEnabled = "obegron.github.io/secret-sync-enabled"
 	annSyncTargets   = "obegron.github.io/secret-sync-targets"
@@ -40,8 +40,7 @@ const (
 	annSourceRef = "obegron.github.io/source"
 	annChecksum  = "obegron.github.io/checksum"
 
-	targetKindCluster  = "cluster"
-	targetKindVcluster = "vcluster"
+	targetKindCluster = "cluster"
 
 	eventReasonConfigInvalid = "SyncConfigInvalid"
 	eventReasonTargetInvalid = "SyncTargetInvalid"
@@ -53,34 +52,33 @@ const (
 )
 
 type runtimeConfig struct {
-	hostKubeconfig        string
-	podNamespace          string
-	sourceNamespace       string
-	vclusterKubeconfigDir string
-	defaultDeletePolicy   string
-	metricsBindAddress    string
-	tenantSafeMode        bool
+	syncMode            string
+	hostKubeconfig      string
+	hostAPIServer       string
+	hostTokenFile       string
+	hostCAFile          string
+	podNamespace        string
+	sourceNamespace     string
+	targetNamespace     string
+	defaultDeletePolicy string
+	metricsBindAddress  string
+	tenantSafeMode      bool
 }
 
 type syncTarget struct {
 	Kind      string `json:"kind"`
 	Namespace string `json:"namespace"`
-	Vcluster  string `json:"vcluster,omitempty"`
 }
 
 func (t syncTarget) ID() string {
-	if t.Kind == targetKindVcluster {
-		return fmt.Sprintf("vcluster/%s/%s", t.Vcluster, t.Namespace)
-	}
 	return fmt.Sprintf("cluster/%s", t.Namespace)
 }
 
 type controller struct {
 	hostClient       kubernetes.Interface
+	localClient      kubernetes.Interface
 	cfg              runtimeConfig
 	allowedTargetIDs map[string]struct{}
-	mu               sync.RWMutex
-	vclusterClients  map[string]kubernetes.Interface
 	ready            atomic.Bool
 	metrics          metricsState
 }
@@ -101,6 +99,11 @@ type metricsState struct {
 
 func main() {
 	log.Printf("starting %s version %s", controllerName, Version)
+
+	syncMode := strings.ToLower(strings.TrimSpace(envOrDefault("SYNC_MODE", modePush)))
+	if syncMode != modePush && syncMode != modePull {
+		log.Fatalf("invalid SYNC_MODE %q (expected %q or %q)", syncMode, modePush, modePull)
+	}
 
 	tenantSafeMode, err := parseBoolEnv("TENANT_SAFE_MODE", false)
 	if err != nil {
@@ -126,23 +129,49 @@ func main() {
 	}
 
 	cfg := runtimeConfig{
-		hostKubeconfig:        os.Getenv("HOST_KUBECONFIG"),
-		podNamespace:          podNamespace,
-		sourceNamespace:       sourceNamespace,
-		vclusterKubeconfigDir: envOrDefault("VCLUSTER_KUBECONFIG_DIR", "/etc/vcluster-kubeconfigs"),
-		defaultDeletePolicy:   normalizeDeletePolicy(envOrDefault("DEFAULT_DELETE_POLICY", "delete")),
-		metricsBindAddress:    envOrDefault("METRICS_BIND_ADDRESS", ":8080"),
-		tenantSafeMode:        tenantSafeMode,
+		syncMode:            syncMode,
+		hostKubeconfig:      os.Getenv("HOST_KUBECONFIG"),
+		hostAPIServer:       strings.TrimSpace(os.Getenv("HOST_API_SERVER")),
+		hostTokenFile:       envOrDefault("HOST_TOKEN_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/token"),
+		hostCAFile:          envOrDefault("HOST_CA_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"),
+		podNamespace:        podNamespace,
+		sourceNamespace:     sourceNamespace,
+		targetNamespace:     strings.TrimSpace(os.Getenv("TARGET_NAMESPACE")),
+		defaultDeletePolicy: normalizeDeletePolicy(envOrDefault("DEFAULT_DELETE_POLICY", "delete")),
+		metricsBindAddress:  envOrDefault("METRICS_BIND_ADDRESS", ":8080"),
+		tenantSafeMode:      tenantSafeMode,
+	}
+	if cfg.targetNamespace == "" {
+		cfg.targetNamespace = cfg.podNamespace
+	}
+	if cfg.syncMode == modePull && strings.TrimSpace(cfg.sourceNamespace) == "" {
+		log.Fatal("SYNC_MODE=pull requires SOURCE_NAMESPACE")
+	}
+	if cfg.syncMode == modePull && strings.TrimSpace(cfg.targetNamespace) == "" {
+		log.Fatal("SYNC_MODE=pull requires TARGET_NAMESPACE or POD_NAMESPACE")
 	}
 
-	hostRest, err := loadConfig(cfg.hostKubeconfig)
+	var hostRest *rest.Config
+	if cfg.syncMode == modePull {
+		hostRest, err = loadHostPullConfig(cfg.hostKubeconfig, cfg.hostAPIServer, cfg.hostTokenFile, cfg.hostCAFile)
+	} else {
+		hostRest, err = loadConfig(cfg.hostKubeconfig)
+	}
 	if err != nil {
-		log.Fatalf("load host kubeconfig: %v", err)
+		log.Fatalf("load host config: %v", err)
 	}
 
 	hostClient, err := kubernetes.NewForConfig(hostRest)
 	if err != nil {
 		log.Fatalf("build host client: %v", err)
+	}
+	localRest, err := rest.InClusterConfig()
+	if err != nil {
+		log.Fatalf("build local in-cluster config: %v", err)
+	}
+	localClient, err := kubernetes.NewForConfig(localRest)
+	if err != nil {
+		log.Fatalf("build local client: %v", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -150,15 +179,23 @@ func main() {
 
 	c := &controller{
 		hostClient:       hostClient,
+		localClient:      localClient,
 		cfg:              cfg,
 		allowedTargetIDs: allowedTargetIDs,
-		vclusterClients:  map[string]kubernetes.Interface{},
 	}
 	go c.serveHTTP(ctx)
 	c.run(ctx)
 }
 
 func (c *controller) run(ctx context.Context) {
+	if c.cfg.syncMode == modePull {
+		c.runPull(ctx)
+		return
+	}
+	c.runPush(ctx)
+}
+
+func (c *controller) runPush(ctx context.Context) {
 	factory := informers.NewSharedInformerFactoryWithOptions(
 		c.hostClient,
 		0,
@@ -215,6 +252,63 @@ func (c *controller) run(ctx context.Context) {
 	<-ctx.Done()
 }
 
+func (c *controller) runPull(ctx context.Context) {
+	factory := informers.NewSharedInformerFactoryWithOptions(
+		c.hostClient,
+		0,
+		informers.WithNamespace(c.cfg.sourceNamespace),
+	)
+	secretInformer := factory.Core().V1().Secrets().Informer()
+
+	secretInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			sec, ok := obj.(*corev1.Secret)
+			if !ok {
+				return
+			}
+			if err := c.reconcilePull(ctx, sec); err != nil {
+				c.metrics.reconcileErrors.Add(1)
+				log.Printf("reconcile pull add %s/%s failed: %v", sec.Namespace, sec.Name, err)
+			}
+		},
+		UpdateFunc: func(_, newObj interface{}) {
+			sec, ok := newObj.(*corev1.Secret)
+			if !ok {
+				return
+			}
+			if err := c.reconcilePull(ctx, sec); err != nil {
+				c.metrics.reconcileErrors.Add(1)
+				log.Printf("reconcile pull update %s/%s failed: %v", sec.Namespace, sec.Name, err)
+			}
+		},
+		DeleteFunc: func(obj interface{}) {
+			sec, ok := obj.(*corev1.Secret)
+			if !ok {
+				tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+				if !ok {
+					return
+				}
+				sec, ok = tombstone.Obj.(*corev1.Secret)
+				if !ok {
+					return
+				}
+			}
+			if err := c.handleDeletePull(ctx, sec); err != nil {
+				c.metrics.deleteErrors.Add(1)
+				log.Printf("handle pull delete %s/%s failed: %v", sec.Namespace, sec.Name, err)
+			}
+		},
+	})
+
+	factory.Start(ctx.Done())
+	if !cache.WaitForCacheSync(ctx.Done(), secretInformer.HasSynced) {
+		log.Fatal("cache sync failed")
+	}
+	c.ready.Store(true)
+
+	<-ctx.Done()
+}
+
 func (c *controller) reconcile(ctx context.Context, src *corev1.Secret) error {
 	if src.Labels[labelSyncEnabled] != "true" {
 		return nil
@@ -253,15 +347,38 @@ func (c *controller) reconcile(ctx context.Context, src *corev1.Secret) error {
 	return nil
 }
 
+func (c *controller) reconcilePull(ctx context.Context, src *corev1.Secret) error {
+	if src.Labels[labelSyncEnabled] != "true" {
+		return nil
+	}
+	c.metrics.reconcileTotal.Add(1)
+
+	checksum, err := secretChecksum(src)
+	if err != nil {
+		return fmt.Errorf("compute checksum: %w", err)
+	}
+
+	targetID := fmt.Sprintf("cluster/%s", c.cfg.targetNamespace)
+	if err := c.reconcileIntoNamespace(ctx, c.localClient, src, c.cfg.targetNamespace, targetID, checksum); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (c *controller) reconcileTarget(ctx context.Context, src *corev1.Secret, target syncTarget, checksum string) error {
 	targetClient, err := c.targetClient(target)
 	if err != nil {
 		return err
 	}
 
+	return c.reconcileIntoNamespace(ctx, targetClient, src, target.Namespace, target.ID(), checksum)
+}
+
+func (c *controller) reconcileIntoNamespace(ctx context.Context, targetClient kubernetes.Interface, src *corev1.Secret, targetNamespace, targetID, checksum string) error {
 	expectedSourceRef := fmt.Sprintf("%s/%s", src.Namespace, src.Name)
 	targetName := src.Name
-	existing, err := targetClient.CoreV1().Secrets(target.Namespace).Get(ctx, targetName, metav1.GetOptions{})
+	existing, err := targetClient.CoreV1().Secrets(targetNamespace).Get(ctx, targetName, metav1.GetOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("get target secret: %w", err)
 	}
@@ -269,7 +386,7 @@ func (c *controller) reconcileTarget(ctx context.Context, src *corev1.Secret, ta
 	desired := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      targetName,
-			Namespace: target.Namespace,
+			Namespace: targetNamespace,
 			Annotations: map[string]string{
 				annManagedBy: controllerName,
 				annSourceRef: fmt.Sprintf("%s/%s", src.Namespace, src.Name),
@@ -282,21 +399,21 @@ func (c *controller) reconcileTarget(ctx context.Context, src *corev1.Secret, ta
 	}
 
 	if apierrors.IsNotFound(err) {
-		_, createErr := targetClient.CoreV1().Secrets(target.Namespace).Create(ctx, desired, metav1.CreateOptions{})
+		_, createErr := targetClient.CoreV1().Secrets(targetNamespace).Create(ctx, desired, metav1.CreateOptions{})
 		if apierrors.IsNotFound(createErr) {
-			msg := fmt.Sprintf("target namespace %q not found for %q", target.Namespace, target.ID())
+			msg := fmt.Sprintf("target namespace %q not found for %q", targetNamespace, targetID)
 			c.emitWarningEvent(ctx, src, eventReasonTargetMissing, msg)
 			return errors.New(msg)
 		}
 		if createErr == nil {
 			c.metrics.syncCreatedTotal.Add(1)
-			c.emitNormalEvent(ctx, src, eventReasonCreated, fmt.Sprintf("synced secret to %s", target.ID()))
+			c.emitNormalEvent(ctx, src, eventReasonCreated, fmt.Sprintf("synced secret to %s", targetID))
 		}
 		return createErr
 	}
 
 	if err := ensureManagedTarget(existing, expectedSourceRef); err != nil {
-		msg := fmt.Sprintf("target %q ownership conflict: %v", target.ID(), err)
+		msg := fmt.Sprintf("target %q ownership conflict: %v", targetID, err)
 		c.emitWarningEvent(ctx, src, eventReasonTargetOwned, msg)
 		return errors.New(msg)
 	}
@@ -306,13 +423,13 @@ func (c *controller) reconcileTarget(ctx context.Context, src *corev1.Secret, ta
 	}
 
 	if existing.Immutable != nil && *existing.Immutable {
-		if delErr := targetClient.CoreV1().Secrets(target.Namespace).Delete(ctx, targetName, metav1.DeleteOptions{}); delErr != nil {
+		if delErr := targetClient.CoreV1().Secrets(targetNamespace).Delete(ctx, targetName, metav1.DeleteOptions{}); delErr != nil {
 			return fmt.Errorf("delete immutable secret before recreate: %w", delErr)
 		}
-		_, createErr := targetClient.CoreV1().Secrets(target.Namespace).Create(ctx, desired, metav1.CreateOptions{})
+		_, createErr := targetClient.CoreV1().Secrets(targetNamespace).Create(ctx, desired, metav1.CreateOptions{})
 		if createErr == nil {
 			c.metrics.syncRecreatedTotal.Add(1)
-			c.emitNormalEvent(ctx, src, eventReasonUpdated, fmt.Sprintf("recreated immutable secret in %s", target.ID()))
+			c.emitNormalEvent(ctx, src, eventReasonUpdated, fmt.Sprintf("recreated immutable secret in %s", targetID))
 		}
 		return createErr
 	}
@@ -321,10 +438,10 @@ func (c *controller) reconcileTarget(ctx context.Context, src *corev1.Secret, ta
 	existing.Data = desired.Data
 	existing.Immutable = desired.Immutable
 	existing.Annotations = desired.Annotations
-	_, updateErr := targetClient.CoreV1().Secrets(target.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
+	_, updateErr := targetClient.CoreV1().Secrets(targetNamespace).Update(ctx, existing, metav1.UpdateOptions{})
 	if updateErr == nil {
 		c.metrics.syncUpdatedTotal.Add(1)
-		c.emitNormalEvent(ctx, src, eventReasonUpdated, fmt.Sprintf("updated synced secret in %s", target.ID()))
+		c.emitNormalEvent(ctx, src, eventReasonUpdated, fmt.Sprintf("updated synced secret in %s", targetID))
 	}
 	return updateErr
 }
@@ -394,18 +511,57 @@ func (c *controller) handleDelete(ctx context.Context, src *corev1.Secret) error
 	return nil
 }
 
+func (c *controller) handleDeletePull(ctx context.Context, src *corev1.Secret) error {
+	if src.Labels[labelSyncEnabled] != "true" {
+		return nil
+	}
+	c.metrics.deleteTotal.Add(1)
+
+	deletePolicy := normalizeDeletePolicy(src.Annotations[annDeletePolicy])
+	if deletePolicy == "" {
+		deletePolicy = c.cfg.defaultDeletePolicy
+	}
+	if deletePolicy == "retain" {
+		return nil
+	}
+
+	existing, err := c.localClient.CoreV1().Secrets(c.cfg.targetNamespace).Get(ctx, src.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	expectedSourceRef := fmt.Sprintf("%s/%s", src.Namespace, src.Name)
+	if err := ensureManagedTarget(existing, expectedSourceRef); err != nil {
+		msg := fmt.Sprintf("target %q ownership conflict: %v", fmt.Sprintf("cluster/%s", c.cfg.targetNamespace), err)
+		c.emitWarningEvent(ctx, src, eventReasonTargetOwned, msg)
+		return errors.New(msg)
+	}
+
+	delErr := c.localClient.CoreV1().Secrets(c.cfg.targetNamespace).Delete(ctx, src.Name, metav1.DeleteOptions{})
+	if delErr == nil {
+		c.metrics.syncDeletedTotal.Add(1)
+		return nil
+	}
+	if apierrors.IsNotFound(delErr) {
+		return nil
+	}
+
+	return delErr
+}
+
 func (c *controller) validateTargetForSource(src *corev1.Secret, target syncTarget) error {
+	if target.Kind != targetKindCluster {
+		return fmt.Errorf("target %q is blocked: push mode only allows kind=%s", target.ID(), targetKindCluster)
+	}
 	if target.Kind == targetKindCluster && target.Namespace == src.Namespace {
 		return fmt.Errorf("target %q points to source namespace %q and is not allowed", target.ID(), src.Namespace)
 	}
 
 	if c.cfg.tenantSafeMode {
-		if target.Kind != targetKindVcluster {
-			return fmt.Errorf("target %q is blocked: TENANT_SAFE_MODE only allows kind=%s", target.ID(), targetKindVcluster)
-		}
-		if target.Namespace != c.cfg.sourceNamespace {
-			return fmt.Errorf("target %q is blocked: TENANT_SAFE_MODE requires target namespace %q", target.ID(), c.cfg.sourceNamespace)
-		}
+		return fmt.Errorf("target %q is blocked: TENANT_SAFE_MODE is only supported in pull mode", target.ID())
 	}
 
 	if len(c.allowedTargetIDs) > 0 {
@@ -421,8 +577,6 @@ func (c *controller) targetClient(target syncTarget) (kubernetes.Interface, erro
 	switch target.Kind {
 	case targetKindCluster:
 		return c.hostClient, nil
-	case targetKindVcluster:
-		return c.vclusterClient(target.Vcluster)
 	default:
 		return nil, fmt.Errorf("unsupported target kind %q", target.Kind)
 	}
@@ -462,22 +616,14 @@ func parseTargets(raw string) ([]syncTarget, error) {
 	for i, t := range targets {
 		t.Kind = strings.ToLower(strings.TrimSpace(t.Kind))
 		t.Namespace = strings.TrimSpace(t.Namespace)
-		t.Vcluster = strings.TrimSpace(t.Vcluster)
 
 		if t.Namespace == "" {
 			return nil, fmt.Errorf("target[%d]: namespace is required", i)
 		}
 		switch t.Kind {
 		case targetKindCluster:
-			if t.Vcluster != "" {
-				return nil, fmt.Errorf("target[%d]: vcluster must be empty for kind=cluster", i)
-			}
-		case targetKindVcluster:
-			if t.Vcluster == "" {
-				return nil, fmt.Errorf("target[%d]: vcluster is required for kind=vcluster", i)
-			}
 		default:
-			return nil, fmt.Errorf("target[%d]: unsupported kind %q", i, t.Kind)
+			return nil, fmt.Errorf("target[%d]: unsupported kind %q (only %q is allowed)", i, t.Kind, targetKindCluster)
 		}
 
 		if _, ok := seen[t.ID()]; ok {
@@ -553,36 +699,6 @@ func (c *controller) emitEvent(ctx context.Context, src *corev1.Secret, eventTyp
 	}
 }
 
-func (c *controller) vclusterClient(vclusterName string) (kubernetes.Interface, error) {
-	c.mu.RLock()
-	cached, ok := c.vclusterClients[vclusterName]
-	c.mu.RUnlock()
-	if ok {
-		return cached, nil
-	}
-
-	kubeconfig := filepath.Join(c.cfg.vclusterKubeconfigDir, fmt.Sprintf("%s.kubeconfig", vclusterName))
-	restCfg, err := loadConfig(kubeconfig)
-	if err != nil {
-		return nil, err
-	}
-
-	client, err := kubernetes.NewForConfig(restCfg)
-	if err != nil {
-		return nil, err
-	}
-
-	c.mu.Lock()
-	if cached, ok := c.vclusterClients[vclusterName]; ok {
-		c.mu.Unlock()
-		return cached, nil
-	}
-	c.vclusterClients[vclusterName] = client
-	c.mu.Unlock()
-
-	return client, nil
-}
-
 func (c *controller) serveHTTP(ctx context.Context) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", c.handleHealthz)
@@ -649,6 +765,40 @@ func loadConfig(kubeconfig string) (*rest.Config, error) {
 		return nil, fmt.Errorf("in-cluster config failed and no kubeconfig provided: %w", err)
 	}
 	return clientcmd.BuildConfigFromFlags("", kubeconfig)
+}
+
+func loadHostPullConfig(kubeconfig, hostAPIServer, tokenFile, caFile string) (*rest.Config, error) {
+	if strings.TrimSpace(kubeconfig) != "" {
+		return loadConfig(kubeconfig)
+	}
+	if strings.TrimSpace(hostAPIServer) == "" {
+		cfg, err := rest.InClusterConfig()
+		if err == nil {
+			return cfg, nil
+		}
+		return nil, fmt.Errorf("in-cluster config failed and HOST_API_SERVER is not set: %w", err)
+	}
+	if strings.TrimSpace(tokenFile) == "" {
+		return nil, errors.New("HOST_TOKEN_FILE is required when HOST_KUBECONFIG is not set")
+	}
+
+	tokenBytes, err := os.ReadFile(tokenFile)
+	if err != nil {
+		return nil, fmt.Errorf("read HOST_TOKEN_FILE %q: %w", tokenFile, err)
+	}
+	token := strings.TrimSpace(string(tokenBytes))
+	if token == "" {
+		return nil, fmt.Errorf("HOST_TOKEN_FILE %q is empty", tokenFile)
+	}
+
+	cfg := &rest.Config{
+		Host:        hostAPIServer,
+		BearerToken: token,
+		TLSClientConfig: rest.TLSClientConfig{
+			CAFile: caFile,
+		},
+	}
+	return cfg, nil
 }
 
 func secretChecksum(secret *corev1.Secret) (string, error) {

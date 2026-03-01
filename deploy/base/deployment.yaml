@@ -23,10 +23,18 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: SYNC_MODE
+              value: push
             - name: SOURCE_NAMESPACE
               value: ""
-            - name: VCLUSTER_KUBECONFIG_DIR
-              value: /etc/vcluster-kubeconfigs
+            - name: TARGET_NAMESPACE
+              value: ""
+            - name: HOST_API_SERVER
+              value: ""
+            - name: HOST_TOKEN_FILE
+              value: /var/run/secrets/kubernetes.io/serviceaccount/token
+            - name: HOST_CA_FILE
+              value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
             - name: DEFAULT_DELETE_POLICY
               value: delete
             - name: TENANT_SAFE_MODE
@@ -51,12 +59,3 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 3
-          volumeMounts:
-            - name: vcluster-kubeconfigs
-              mountPath: /etc/vcluster-kubeconfigs
-              readOnly: true
-      volumes:
-        - name: vcluster-kubeconfigs
-          secret:
-            secretName: vcluster-kubeconfigs
-            optional: false

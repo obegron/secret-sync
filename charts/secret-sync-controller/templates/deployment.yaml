@@ -23,10 +23,18 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: SYNC_MODE
+              value: {{ .Values.controller.syncMode | quote }}
             - name: SOURCE_NAMESPACE
               value: {{ .Values.controller.sourceNamespace | quote }}
-            - name: VCLUSTER_KUBECONFIG_DIR
-              value: {{ .Values.controller.vclusterKubeconfigDir | quote }}
+            - name: TARGET_NAMESPACE
+              value: {{ .Values.controller.targetNamespace | quote }}
+            - name: HOST_API_SERVER
+              value: {{ .Values.controller.hostAPIServer | quote }}
+            - name: HOST_TOKEN_FILE
+              value: {{ .Values.controller.hostTokenFile | quote }}
+            - name: HOST_CA_FILE
+              value: {{ .Values.controller.hostCAFile | quote }}
             - name: DEFAULT_DELETE_POLICY
               value: {{ .Values.controller.defaultDeletePolicy | quote }}
             - name: TENANT_SAFE_MODE
@@ -53,17 +61,8 @@ spec:
             timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
             failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
 {{- end }}
-          volumeMounts:
-            - name: vcluster-kubeconfigs
-              mountPath: {{ .Values.controller.vclusterKubeconfigDir | quote }}
-              readOnly: true
           resources:
 {{ toYaml .Values.resources | indent 12 }}
-      volumes:
-        - name: vcluster-kubeconfigs
-          secret:
-            secretName: {{ .Values.kubeconfigSecret.name }}
-            optional: {{ .Values.kubeconfigSecret.optional }}
 {{- with .Values.nodeSelector }}
       nodeSelector:
 {{ toYaml . | indent 8 }}

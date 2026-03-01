@@ -1,11 +1,9 @@
 # secret-sync-controller
 
-Annotation-driven controller that syncs selected host-cluster Secrets to one or many targets.
+Secret sync controller with two explicit runtime modes:
 
-Supported target kinds:
-
-- `vcluster`
-- `cluster`
+- `push`: host-cluster source -> host-cluster target namespaces
+- `pull`: host-cluster source -> local namespace in the cluster where the agent runs (vcluster pattern)
 
 ## Source Secret contract
 
@@ -13,7 +11,7 @@ Required label:
 
 - `obegron.github.io/secret-sync-enabled=true`
 
-Required annotation:
+Required annotation (`push` mode only):
 
 - `obegron.github.io/secret-sync-targets` (JSON array)
 
@@ -21,7 +19,6 @@ Example target annotation value:
 
 ```json
 [
-  {"kind":"vcluster","vcluster":"tenant-a-dev01","namespace":"app-runtime"},
   {"kind":"cluster","namespace":"shared-runtime"}
 ]
 ```
@@ -32,108 +29,53 @@ Optional annotation:
 
 ## Runtime configuration
 
-- `HOST_KUBECONFIG` (optional; if unset, use in-cluster config)
+- `SYNC_MODE` (`push` or `pull`, default `push`)
+- `HOST_KUBECONFIG` (optional)
 - `POD_NAMESPACE` (set by Downward API in manifests/chart)
-- `SOURCE_NAMESPACE` (optional; if unset and `TENANT_SAFE_MODE=false`, watch all namespaces)
-- `VCLUSTER_KUBECONFIG_DIR` (default `/etc/vcluster-kubeconfigs`)
+- `SOURCE_NAMESPACE`
+- `TARGET_NAMESPACE` (used by `pull` mode; if unset, defaults to `POD_NAMESPACE`)
+- `HOST_API_SERVER` (used by `pull` mode when `HOST_KUBECONFIG` is not set)
+- `HOST_TOKEN_FILE` (used by `pull` mode, default serviceaccount token path)
+- `HOST_CA_FILE` (used by `pull` mode, default serviceaccount CA path)
 - `DEFAULT_DELETE_POLICY` (`delete` or `retain`, default `delete`)
-- `TENANT_SAFE_MODE` (`true|false`, default `false`)
-- `ALLOWED_SYNC_TARGETS` (optional JSON array of allowed targets; same schema as `secret-sync-targets`)
-- `METRICS_BIND_ADDRESS` (default `:8080`; serves `/healthz`, `/readyz`, `/metrics`)
-
-Vcluster kubeconfig files are resolved as:
-
-- `/etc/vcluster-kubeconfigs/<vcluster-name>.kubeconfig`
+- `TENANT_SAFE_MODE` (`true|false`, default `false`; pull mode only)
+- `ALLOWED_SYNC_TARGETS` (optional JSON array allowlist, push mode)
+- `METRICS_BIND_ADDRESS` (default `:8080`; serves `/healthz`, `/readyz`, `/version`, `/metrics`)
 
 ## Sync behavior
 
-- Copies secret `type`, `data`, and `immutable`.
-- Target secret name is same as source name.
+- Copies secret `type`, `data`, and `immutable`
+- Target secret name is same as source name
 - Adds managed annotations:
   - `obegron.github.io/managed-by=secret-sync-controller`
   - `obegron.github.io/source=<source-namespace>/<source-name>`
   - `obegron.github.io/checksum=<sha256>`
-- Updates only when checksum changes.
-- If target secret is immutable and content changes, controller recreates it.
-- Existing target secrets are only updated/deleted when they are already managed by this controller and have matching source annotation.
-- On source delete, controller deletes targets unless delete policy is `retain`.
+- Existing target secrets are only updated/deleted when owned by this controller and matching source annotation
+- On source delete, controller deletes targets unless delete policy is `retain`
 
-## Security Modes
+## Runtime modes
 
-Tenant-safe mode (recommended for tenant-owned namespaces):
+- `push`: watches source Secrets and syncs to `kind=cluster` targets only
+- `pull`: watches source Secrets and mirrors to one local namespace; `secret-sync-targets` is ignored
 
-- Set `TENANT_SAFE_MODE=true`.
-- Omit `SOURCE_NAMESPACE` to auto-scope to `POD_NAMESPACE` (or set it explicitly to match pod namespace).
-- Only `kind=vcluster` targets are allowed.
-- Target namespace must match the controller source namespace.
+## Security modes
 
-Platform mode (shared/system controller):
+Tenant-safe mode (`TENANT_SAFE_MODE=true`):
 
-- Keep `TENANT_SAFE_MODE=false`.
-- Set `SOURCE_NAMESPACE` and/or `ALLOWED_SYNC_TARGETS` to constrain blast radius.
+- intended for pull mode
+- scopes source to pod namespace when `SOURCE_NAMESPACE` is unset
 
-## Local integration test
+Platform mode (`TENANT_SAFE_MODE=false`):
 
-Required commands:
+- set `SOURCE_NAMESPACE` and/or `ALLOWED_SYNC_TARGETS` to constrain blast radius
 
-- `docker`
-- `k3d`
-- `kubectl`
-- `helm`
-- `curl`
-
-Run full flow:
-
-```bash
-make integration-test
-```
-
-Run container vulnerability scan:
-
-```bash
-make scan-image
-```
-
-Teardown:
-
-```bash
-make integration-down
-```
-
-Defaults use:
-
-- k3d cluster: `secret-sync-it`
-- vcluster release: `tenant-a-dev01` in namespace `vcluster-tenant-a-dev01`
-- source secret: `tenant-host-ns/app-db-secret`
-- vcluster target namespace: `app-runtime`
-- cluster target namespaces: `shared-runtime`, `shared-runtime-2`
-
-## License
-
-Apache License 2.0. See `LICENSE`.
-
-## Deploy
-
-Kustomize manifests:
-
-```bash
-kubectl apply -k deploy/base
-```
-
-Helm chart:
-
-```bash
-helm upgrade --install secret-sync-controller \
-  ./charts/secret-sync-controller \
-  --namespace secret-sync-system \
-  --create-namespace
-```
-
-Version management:
+## Build and release
 
 ```bash
 make show-version
 make set-version VERSION=0.1.1
+make docker-build
+make docker-push
 ```
 
 `set-version` updates:
@@ -142,70 +84,53 @@ make set-version VERSION=0.1.1
 - `charts/secret-sync-controller/Chart.yaml` `version`
 - `charts/secret-sync-controller/Chart.yaml` `appVersion`
 
-## After Install
-
-Create required namespaces:
+Run container vulnerability scan:
 
 ```bash
-kubectl create namespace tenant-host-ns --dry-run=client -o yaml | kubectl apply -f -
-kubectl create namespace shared-runtime --dry-run=client -o yaml | kubectl apply -f -
+make scan-image
 ```
 
-Create the target namespace inside your vcluster:
+## Local integration test
 
 ```bash
-KUBECONFIG=/path/to/tenant-a-dev01.kubeconfig \
-  kubectl create namespace app-runtime --dry-run=client -o yaml | \
-  KUBECONFIG=/path/to/tenant-a-dev01.kubeconfig kubectl apply -f -
+make integration-test
+make integration-test-pull
+make integration-down
 ```
 
-For the many-target-namespaces example, also create:
+## Deploy
 
 ```bash
-kubectl create namespace shared-runtime-a --dry-run=client -o yaml | kubectl apply -f -
-kubectl create namespace shared-runtime-b --dry-run=client -o yaml | kubectl apply -f -
-KUBECONFIG=/path/to/tenant-a-dev01.kubeconfig \
-  kubectl create namespace app-runtime-a --dry-run=client -o yaml | \
-  KUBECONFIG=/path/to/tenant-a-dev01.kubeconfig kubectl apply -f -
-KUBECONFIG=/path/to/tenant-a-dev01.kubeconfig \
-  kubectl create namespace app-runtime-b --dry-run=client -o yaml | \
-  KUBECONFIG=/path/to/tenant-a-dev01.kubeconfig kubectl apply -f -
+kubectl apply -k deploy/base
 ```
-
-Apply vcluster kubeconfig secret (controller reads vcluster kubeconfigs from this Secret):
 
 ```bash
-kubectl apply -f deploy/examples/vcluster-kubeconfigs-secret.yaml
+helm upgrade --install secret-sync-controller \
+  ./charts/secret-sync-controller \
+  --namespace secret-sync-system \
+  --create-namespace
 ```
 
-Apply a source Secret with multi-target sync (vcluster + host cluster):
+## Examples
 
-```bash
-kubectl apply -f deploy/examples/source-secret.yaml
-```
-
-Apply a source Secret with vcluster-only sync:
-
-```bash
-kubectl apply -f deploy/examples/source-secret-vcluster-only.yaml
-```
-
-Apply a source Secret with host-cluster-only sync:
-
-```bash
-kubectl apply -f deploy/examples/source-secret-cluster-only.yaml
-```
-
-Apply a source Secret with many target namespaces:
-
-```bash
-kubectl apply -f deploy/examples/source-secret-many-namespaces.yaml
-```
-
-Example manifests are in:
-
-- `deploy/examples/vcluster-kubeconfigs-secret.yaml`
 - `deploy/examples/source-secret.yaml`
-- `deploy/examples/source-secret-vcluster-only.yaml`
 - `deploy/examples/source-secret-cluster-only.yaml`
 - `deploy/examples/source-secret-many-namespaces.yaml`
+
+## OIDC helper (for vcluster pull auth)
+
+`cmd/oidc-helper` provides an OIDC discovery/JWKS endpoint in two modes:
+
+- `OIDC_MODE=proxy`: proxies Kubernetes `/.well-known/openid-configuration` and `/openid/v1/jwks`, rewriting `jwks_uri` to `ENVIRONMENT_BASE_URL`.
+- `OIDC_MODE=static`: serves static OIDC config/JWKS from file or inline JSON (useful for integration tests without live upstream).
+
+Build/run:
+
+```bash
+make build-oidc-helper
+make run-oidc-helper
+```
+
+## License
+
+Apache License 2.0. See `LICENSE`.

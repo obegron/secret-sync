@@ -19,16 +19,16 @@ rbac:
   create: true
 
 controller:
+  syncMode: push
   sourceNamespace: ""
-  vclusterKubeconfigDir: /etc/vcluster-kubeconfigs
+  targetNamespace: ""
+  hostAPIServer: ""
+  hostTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+  hostCAFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
   defaultDeletePolicy: delete
   tenantSafeMode: false
   allowedSyncTargets: ""
   metricsBindAddress: :8080
-
-kubeconfigSecret:
-  name: vcluster-kubeconfigs
-  optional: false
 
 probes:
   enabled: true

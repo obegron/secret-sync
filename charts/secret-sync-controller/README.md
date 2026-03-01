@@ -17,14 +17,11 @@ image:
   tag: "0.1.0" # optional; defaults to chart appVersion
 
 controller:
+  syncMode: push
   sourceNamespace: tenant-host-ns
   defaultDeletePolicy: delete
-  tenantSafeMode: true
-  allowedSyncTargets: '[{"kind":"vcluster","vcluster":"tenant-a-dev01","namespace":"tenant-host-ns"}]'
-
-kubeconfigSecret:
-  name: vcluster-kubeconfigs
-  optional: false
+  tenantSafeMode: false
+  allowedSyncTargets: '[{"kind":"cluster","namespace":"shared-runtime"}]'
 ```
 
 Render:
