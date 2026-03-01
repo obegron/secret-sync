@@ -23,7 +23,7 @@ CLUSTER_TARGET_NAMESPACE_2 ?= shared-runtime-2
 SOURCE_SECRET_NAME ?= app-db-secret
 CONTROLLER_NAMESPACE ?= secret-sync-system
 
-.PHONY: help tidy fmt vet build build-oidc-helper test docker-build-local docker-build docker-push show-version set-version scan-image run run-oidc-helper clean check-tools integration-up integration-test integration-test-pull integration-down
+.PHONY: help tidy fmt vet build build-oidc-helper test docker-build-local docker-build docker-push show-version set-version scan-image run run-oidc-helper clean check-tools integration-up integration-test integration-test-pull integration-test-collision integration-down
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "; print "Targets:"} /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -113,7 +113,7 @@ integration-up: check-tools ## Create local k3d + controller integration environ
 		--from-literal=username=appuser \
 		--from-literal=password=supersecret \
 		--dry-run=client -o yaml | kubectl apply -f -; \
-	TARGETS_JSON=$$(printf '[{"kind":"cluster","namespace":"%s"},{"kind":"cluster","namespace":"%s"}]' "$(CLUSTER_TARGET_NAMESPACE)" "$(CLUSTER_TARGET_NAMESPACE_2)"); \
+	TARGETS_JSON=$$(printf '[{"kind":"cluster","namespace":"%s"},{"kind":"cluster","namespace":"%s","name":"%s-alt"}]' "$(CLUSTER_TARGET_NAMESPACE)" "$(CLUSTER_TARGET_NAMESPACE_2)" "$(SOURCE_SECRET_NAME)"); \
 	FORCE_TS=$$(date +%s); \
 	kubectl -n "$(SOURCE_NAMESPACE)" annotate secret "$(SOURCE_SECRET_NAME)" \
 		obegron.github.io/secret-sync-targets="$$TARGETS_JSON" \
@@ -141,12 +141,13 @@ integration-test: integration-up ## Run full integration test and validate synce
 		fi; \
 		sleep 2; \
 	done; \
+	SOURCE_SECRET_ALT_NAME="$(SOURCE_SECRET_NAME)-alt"; \
 	cluster_username=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$(SOURCE_SECRET_NAME)" -o jsonpath='{.data.username}' | base64 -d); \
 	cluster_password=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$(SOURCE_SECRET_NAME)" -o jsonpath='{.data.password}' | base64 -d); \
 	[ "$$cluster_username" = "appuser" ]; \
 	[ "$$cluster_password" = "supersecret" ]; \
-	cluster2_username=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$(SOURCE_SECRET_NAME)" -o jsonpath='{.data.username}' | base64 -d); \
-	cluster2_password=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$(SOURCE_SECRET_NAME)" -o jsonpath='{.data.password}' | base64 -d); \
+	cluster2_username=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$SOURCE_SECRET_ALT_NAME" -o jsonpath='{.data.username}' | base64 -d); \
+	cluster2_password=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$SOURCE_SECRET_ALT_NAME" -o jsonpath='{.data.password}' | base64 -d); \
 	[ "$$cluster2_username" = "appuser" ]; \
 	[ "$$cluster2_password" = "supersecret" ]; \
 	reasons=$$(kubectl -n "$(SOURCE_NAMESPACE)" get events --field-selector involvedObject.kind=Secret,involvedObject.name="$(SOURCE_SECRET_NAME)" -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}'); \
@@ -155,7 +156,7 @@ integration-test: integration-up ## Run full integration test and validate synce
 	kubectl -n "$(SOURCE_NAMESPACE)" patch secret "$(SOURCE_SECRET_NAME)" --type merge -p "{\"data\":{\"password\":\"$$pw_b64\"}}"; \
 	for i in $$(seq 1 30); do \
 		cluster_password2=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$(SOURCE_SECRET_NAME)" -o jsonpath='{.data.password}' | base64 -d 2>/dev/null || true); \
-		cluster2_password2=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$(SOURCE_SECRET_NAME)" -o jsonpath='{.data.password}' | base64 -d 2>/dev/null || true); \
+		cluster2_password2=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$SOURCE_SECRET_ALT_NAME" -o jsonpath='{.data.password}' | base64 -d 2>/dev/null || true); \
 		if [ "$$cluster_password2" = "supersecret2" ] && [ "$$cluster2_password2" = "supersecret2" ]; then \
 			break; \
 		fi; \
@@ -163,7 +164,7 @@ integration-test: integration-up ## Run full integration test and validate synce
 	done; \
 	cluster_password2=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$(SOURCE_SECRET_NAME)" -o jsonpath='{.data.password}' | base64 -d); \
 	[ "$$cluster_password2" = "supersecret2" ]; \
-	cluster2_password2=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$(SOURCE_SECRET_NAME)" -o jsonpath='{.data.password}' | base64 -d); \
+	cluster2_password2=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$SOURCE_SECRET_ALT_NAME" -o jsonpath='{.data.password}' | base64 -d); \
 	[ "$$cluster2_password2" = "supersecret2" ]; \
 	reasons2=$$(kubectl -n "$(SOURCE_NAMESPACE)" get events --field-selector involvedObject.kind=Secret,involvedObject.name="$(SOURCE_SECRET_NAME)" -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}'); \
 	echo "$$reasons2" | grep -q 'SyncUpdated'; \
@@ -259,6 +260,47 @@ integration-test-pull: integration-up ## Run pull-mode integration test with sta
 	echo "integration pull test passed"; \
 	kill $$OIDC_PID >/dev/null 2>&1 || true; \
 	trap - EXIT
+
+integration-test-collision: integration-up ## Run push-mode collision test for renamed targets
+	@set -euo pipefail; \
+	SECRET_A="$(SOURCE_SECRET_NAME)-a"; \
+	SECRET_B="$(SOURCE_SECRET_NAME)-b"; \
+	TARGET_NAME="$(SOURCE_SECRET_NAME)-shared"; \
+	kubectl -n "$(SOURCE_NAMESPACE)" delete secret "$$SECRET_A" "$$SECRET_B" --ignore-not-found; \
+	kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" delete secret "$$TARGET_NAME" --ignore-not-found; \
+	kubectl -n "$(SOURCE_NAMESPACE)" create secret generic "$$SECRET_A" \
+		--from-literal=username=usera \
+		--from-literal=password=pwa \
+		--dry-run=client -o yaml | kubectl apply -f -; \
+	kubectl -n "$(SOURCE_NAMESPACE)" create secret generic "$$SECRET_B" \
+		--from-literal=username=userb \
+		--from-literal=password=pwb \
+		--dry-run=client -o yaml | kubectl apply -f -; \
+	TARGET_A=$$(printf '[{"kind":"cluster","namespace":"%s","name":"%s"}]' "$(CLUSTER_TARGET_NAMESPACE)" "$$TARGET_NAME"); \
+	kubectl -n "$(SOURCE_NAMESPACE)" annotate secret "$$SECRET_A" \
+		obegron.github.io/secret-sync-targets="$$TARGET_A" \
+		obegron.github.io/delete-policy=delete --overwrite; \
+	kubectl -n "$(SOURCE_NAMESPACE)" patch secret "$$SECRET_A" --type merge -p '{"metadata":{"labels":{"obegron.github.io/secret-sync-enabled":"true"}}}'; \
+	for i in $$(seq 1 30); do \
+		if kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$TARGET_NAME" >/dev/null 2>&1; then \
+			break; \
+		fi; \
+		sleep 2; \
+	done; \
+	kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$TARGET_NAME" >/dev/null; \
+	TARGET_B=$$(printf '[{"kind":"cluster","namespace":"%s","name":"%s"}]' "$(CLUSTER_TARGET_NAMESPACE)" "$$TARGET_NAME"); \
+	kubectl -n "$(SOURCE_NAMESPACE)" annotate secret "$$SECRET_B" \
+		obegron.github.io/secret-sync-targets="$$TARGET_B" \
+		obegron.github.io/delete-policy=delete --overwrite; \
+	kubectl -n "$(SOURCE_NAMESPACE)" patch secret "$$SECRET_B" --type merge -p '{"metadata":{"labels":{"obegron.github.io/secret-sync-enabled":"true"}}}'; \
+	sleep 4; \
+	target_user=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$TARGET_NAME" -o jsonpath='{.data.username}' | base64 -d); \
+	target_pw=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$TARGET_NAME" -o jsonpath='{.data.password}' | base64 -d); \
+	[ "$$target_user" = "usera" ]; \
+	[ "$$target_pw" = "pwa" ]; \
+	reasons_b=$$(kubectl -n "$(SOURCE_NAMESPACE)" get events --field-selector involvedObject.kind=Secret,involvedObject.name="$$SECRET_B" -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}'); \
+	echo "$$reasons_b" | grep -q 'SyncTargetOwnershipConflict'; \
+	echo "integration collision test passed"
 
 integration-down: check-tools ## Delete integration cluster and temp files
 	@set -euo pipefail; \

@@ -19,9 +19,12 @@ Example target annotation value:
 
 ```json
 [
-  {"kind":"cluster","namespace":"shared-runtime"}
+  {"kind":"cluster","namespace":"shared-runtime"},
+  {"kind":"cluster","namespace":"shared-runtime","name":"db-credentials"}
 ]
 ```
+
+`name` is optional. When omitted, target secret name equals source name.
 
 Optional annotation:
 
@@ -99,6 +102,7 @@ make scan-image
 ```bash
 make integration-test
 make integration-test-pull
+make integration-test-collision
 make integration-down
 ```
 
@@ -120,6 +124,7 @@ helm upgrade --install secret-sync-controller \
 - `deploy/examples/source-secret.yaml`
 - `deploy/examples/source-secret-cluster-only.yaml`
 - `deploy/examples/source-secret-many-namespaces.yaml`
+- `deploy/examples/source-secret-renamed-target.yaml`
 
 ## OIDC helper (for vcluster pull auth)
 

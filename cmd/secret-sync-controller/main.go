@@ -18,6 +18,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -68,10 +69,25 @@ type runtimeConfig struct {
 type syncTarget struct {
 	Kind      string `json:"kind"`
 	Namespace string `json:"namespace"`
+	Name      string `json:"name,omitempty"`
 }
 
 func (t syncTarget) ID() string {
+	if t.Name != "" {
+		return fmt.Sprintf("cluster/%s/%s", t.Namespace, t.Name)
+	}
 	return fmt.Sprintf("cluster/%s", t.Namespace)
+}
+
+func (t syncTarget) namespaceID() string {
+	return fmt.Sprintf("cluster/%s", t.Namespace)
+}
+
+func (t syncTarget) targetName(sourceName string) string {
+	if strings.TrimSpace(t.Name) != "" {
+		return t.Name
+	}
+	return sourceName
 }
 
 type controller struct {
@@ -473,7 +489,7 @@ func (c *controller) reconcilePull(ctx context.Context, src *corev1.Secret) erro
 			errs = append(errs, targetErr.Error())
 			continue
 		}
-		if targetErr := c.reconcileIntoNamespace(ctx, c.localClient, src, target.Namespace, target.ID(), checksum); targetErr != nil {
+		if targetErr := c.reconcileIntoNamespace(ctx, c.localClient, src, target.Namespace, target.targetName(src.Name), target.ID(), checksum); targetErr != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", target.ID(), targetErr))
 		}
 	}
@@ -491,12 +507,11 @@ func (c *controller) reconcileTarget(ctx context.Context, src *corev1.Secret, ta
 		return err
 	}
 
-	return c.reconcileIntoNamespace(ctx, targetClient, src, target.Namespace, target.ID(), checksum)
+	return c.reconcileIntoNamespace(ctx, targetClient, src, target.Namespace, target.targetName(src.Name), target.ID(), checksum)
 }
 
-func (c *controller) reconcileIntoNamespace(ctx context.Context, targetClient kubernetes.Interface, src *corev1.Secret, targetNamespace, targetID, checksum string) error {
+func (c *controller) reconcileIntoNamespace(ctx context.Context, targetClient kubernetes.Interface, src *corev1.Secret, targetNamespace, targetName, targetID, checksum string) error {
 	expectedSourceRef := fmt.Sprintf("%s/%s", src.Namespace, src.Name)
-	targetName := src.Name
 	existing, err := targetClient.CoreV1().Secrets(targetNamespace).Get(ctx, targetName, metav1.GetOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("get target secret: %w", err)
@@ -596,7 +611,8 @@ func (c *controller) handleDelete(ctx context.Context, src *corev1.Secret) error
 			continue
 		}
 
-		existing, getErr := targetClient.CoreV1().Secrets(target.Namespace).Get(ctx, src.Name, metav1.GetOptions{})
+		targetName := target.targetName(src.Name)
+		existing, getErr := targetClient.CoreV1().Secrets(target.Namespace).Get(ctx, targetName, metav1.GetOptions{})
 		if apierrors.IsNotFound(getErr) {
 			continue
 		}
@@ -613,7 +629,7 @@ func (c *controller) handleDelete(ctx context.Context, src *corev1.Secret) error
 			continue
 		}
 
-		delErr := targetClient.CoreV1().Secrets(target.Namespace).Delete(ctx, src.Name, metav1.DeleteOptions{})
+		delErr := targetClient.CoreV1().Secrets(target.Namespace).Delete(ctx, targetName, metav1.DeleteOptions{})
 		if delErr == nil {
 			c.metrics.syncDeletedTotal.Add(1)
 			continue
@@ -655,7 +671,8 @@ func (c *controller) handleDeletePull(ctx context.Context, src *corev1.Secret) e
 			continue
 		}
 
-		existing, getErr := c.localClient.CoreV1().Secrets(target.Namespace).Get(ctx, src.Name, metav1.GetOptions{})
+		targetName := target.targetName(src.Name)
+		existing, getErr := c.localClient.CoreV1().Secrets(target.Namespace).Get(ctx, targetName, metav1.GetOptions{})
 		if apierrors.IsNotFound(getErr) {
 			continue
 		}
@@ -672,7 +689,7 @@ func (c *controller) handleDeletePull(ctx context.Context, src *corev1.Secret) e
 			continue
 		}
 
-		delErr := c.localClient.CoreV1().Secrets(target.Namespace).Delete(ctx, src.Name, metav1.DeleteOptions{})
+		delErr := c.localClient.CoreV1().Secrets(target.Namespace).Delete(ctx, targetName, metav1.DeleteOptions{})
 		if delErr == nil {
 			c.metrics.syncDeletedTotal.Add(1)
 			continue
@@ -701,10 +718,8 @@ func (c *controller) validateTargetForSource(src *corev1.Secret, target syncTarg
 		return fmt.Errorf("target %q is blocked: PULL_NAMESPACE_ISOLATION is only supported in pull mode", target.ID())
 	}
 
-	if len(c.allowedTargetIDs) > 0 {
-		if _, ok := c.allowedTargetIDs[target.ID()]; !ok {
-			return fmt.Errorf("target %q is blocked by ALLOWED_SYNC_TARGETS", target.ID())
-		}
+	if len(c.allowedTargetIDs) > 0 && !c.isTargetAllowed(target) {
+		return fmt.Errorf("target %q is blocked by ALLOWED_SYNC_TARGETS", target.ID())
 	}
 
 	return nil
@@ -733,12 +748,22 @@ func (c *controller) validatePullTarget(src *corev1.Secret, target syncTarget) e
 	if c.cfg.hostKubeconfig == "" && c.cfg.hostAPIServer == "" && target.Namespace == src.Namespace {
 		return fmt.Errorf("target %q points to source namespace %q and is not allowed in same-cluster pull mode", target.ID(), src.Namespace)
 	}
-	if len(c.allowedTargetIDs) > 0 {
-		if _, ok := c.allowedTargetIDs[target.ID()]; !ok {
-			return fmt.Errorf("target %q is blocked by ALLOWED_SYNC_TARGETS", target.ID())
-		}
+	if len(c.allowedTargetIDs) > 0 && !c.isTargetAllowed(target) {
+		return fmt.Errorf("target %q is blocked by ALLOWED_SYNC_TARGETS", target.ID())
 	}
 	return nil
+}
+
+func (c *controller) isTargetAllowed(target syncTarget) bool {
+	if _, ok := c.allowedTargetIDs[target.ID()]; ok {
+		return true
+	}
+	if target.Name != "" {
+		if _, ok := c.allowedTargetIDs[target.namespaceID()]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *controller) targetClient(target syncTarget) (kubernetes.Interface, error) {
@@ -784,6 +809,7 @@ func parseTargets(raw string) ([]syncTarget, error) {
 	for i, t := range targets {
 		t.Kind = strings.ToLower(strings.TrimSpace(t.Kind))
 		t.Namespace = strings.TrimSpace(t.Namespace)
+		t.Name = strings.TrimSpace(t.Name)
 
 		if t.Namespace == "" {
 			return nil, fmt.Errorf("target[%d]: namespace is required", i)
@@ -792,6 +818,11 @@ func parseTargets(raw string) ([]syncTarget, error) {
 		case targetKindCluster:
 		default:
 			return nil, fmt.Errorf("target[%d]: unsupported kind %q (only %q is allowed)", i, t.Kind, targetKindCluster)
+		}
+		if t.Name != "" {
+			if errs := validation.IsDNS1123Subdomain(t.Name); len(errs) > 0 {
+				return nil, fmt.Errorf("target[%d]: invalid name %q: %s", i, t.Name, strings.Join(errs, ", "))
+			}
 		}
 
 		if _, ok := seen[t.ID()]; ok {
