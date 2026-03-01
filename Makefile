@@ -180,8 +180,8 @@ integration-test-pull: integration-up ## Run pull-mode integration test with sta
 		TENANT_SAFE_MODE=false \
 		ALLOWED_SYNC_TARGETS=""; \
 	kubectl -n "$(CONTROLLER_NAMESPACE)" rollout status deployment/secret-sync-controller --timeout=180s; \
-	kubectl get --raw '/.well-known/openid-configuration' > "$(INTEGRATION_TMP_DIR)/static-oidc-config.json"; \
-	kubectl get --raw '/openid/v1/jwks' > "$(INTEGRATION_TMP_DIR)/static-jwks.json"; \
+	printf '%s\n' '{"issuer":"https://kubernetes.default.svc","jwks_uri":"https://placeholder.invalid/openid/v1/jwks","response_types_supported":["id_token"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]}' > "$(INTEGRATION_TMP_DIR)/static-oidc-config.json"; \
+	printf '%s\n' '{"keys":[]}' > "$(INTEGRATION_TMP_DIR)/static-jwks.json"; \
 	ENVIRONMENT_BASE_URL="http://127.0.0.1:19090" \
 	OIDC_MODE=static \
 	PORT=19090 \

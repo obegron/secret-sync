@@ -177,8 +177,14 @@ func (a *app) handleRoot(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) handleOIDCConfig(w http.ResponseWriter, _ *http.Request) {
 	if a.cfg.Mode == "static" {
+		var oidcData map[string]interface{}
+		if err := json.Unmarshal(a.staticOIDCJSON, &oidcData); err != nil {
+			httpErrorJSON(w, http.StatusInternalServerError, fmt.Sprintf("error parsing static OIDC configuration: %v", err))
+			return
+		}
+		oidcData["jwks_uri"] = strings.TrimSuffix(a.cfg.EnvironmentBaseURL, "/") + "/openid/v1/jwks"
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(a.staticOIDCJSON)
+		_ = json.NewEncoder(w).Encode(oidcData)
 		return
 	}
 
