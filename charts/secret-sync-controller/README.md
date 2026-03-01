@@ -14,7 +14,7 @@ Example values override:
 ```yaml
 image:
   repository: docker.io/obegron/secret-sync-controller
-  tag: "0.1.0" # optional; defaults to chart appVersion
+  tag: "0.2.0" # optional; defaults to chart appVersion
 
 controller:
   syncMode: push

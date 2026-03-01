@@ -43,7 +43,6 @@ const (
 	targetKindCluster = "cluster"
 
 	eventReasonConfigInvalid = "SyncConfigInvalid"
-	eventReasonTargetInvalid = "SyncTargetInvalid"
 	eventReasonTargetBlocked = "SyncTargetBlocked"
 	eventReasonTargetOwned   = "SyncTargetOwnershipConflict"
 	eventReasonTargetMissing = "SyncTargetNamespaceMissing"

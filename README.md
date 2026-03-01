@@ -34,7 +34,7 @@ Optional annotation:
 - `POD_NAMESPACE` (set by Downward API in manifests/chart)
 - `SOURCE_NAMESPACE`
 - `TARGET_NAMESPACE` (used by `pull` mode; if unset, defaults to `POD_NAMESPACE`)
-- `HOST_API_SERVER` (used by `pull` mode when `HOST_KUBECONFIG` is not set)
+- `HOST_API_SERVER` (used by `pull` mode when `HOST_KUBECONFIG` is not set; if empty, falls back to in-cluster host API config)
 - `HOST_TOKEN_FILE` (used by `pull` mode, default serviceaccount token path)
 - `HOST_CA_FILE` (used by `pull` mode, default serviceaccount CA path)
 - `DEFAULT_DELETE_POLICY` (`delete` or `retain`, default `delete`)
@@ -73,7 +73,7 @@ Platform mode (`TENANT_SAFE_MODE=false`):
 
 ```bash
 make show-version
-make set-version VERSION=0.1.1
+make set-version VERSION=0.2.1
 make docker-build
 make docker-push
 ```
@@ -83,6 +83,7 @@ make docker-push
 - `VERSION`
 - `charts/secret-sync-controller/Chart.yaml` `version`
 - `charts/secret-sync-controller/Chart.yaml` `appVersion`
+- `deploy/base/deployment.yaml` image tag
 
 Run container vulnerability scan:
 

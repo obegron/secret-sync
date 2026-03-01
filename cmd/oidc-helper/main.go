@@ -250,8 +250,8 @@ func loadStaticJSON(filePath, rawJSON, name string) ([]byte, error) {
 }
 
 func httpErrorJSON(w http.ResponseWriter, code int, msg string) {
-	w.WriteHeader(code)
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"msg": msg})
 }
 

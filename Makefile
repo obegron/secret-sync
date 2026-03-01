@@ -7,7 +7,7 @@ VERSION ?= $(shell cat $(VERSION_FILE))
 ifeq ($(strip $(VERSION)),)
 VERSION := $(shell cat $(VERSION_FILE))
 endif
-IMAGE_NAME ?= obegron/secret-sync-controller
+IMAGE_NAME ?= docker.io/obegron/secret-sync-controller
 IMAGE ?= $(IMAGE_NAME):$(VERSION)
 PLATFORMS ?= linux/amd64,linux/arm64
 TRIVY_IMAGE ?= aquasec/trivy:0.69.1
@@ -63,6 +63,7 @@ set-version: ## Set VERSION and sync chart version/appVersion (usage: make set-v
 	@printf '%s\n' "$(VERSION)" > "$(VERSION_FILE)"
 	@sed -E -i 's/^version: .*/version: $(VERSION)/' charts/secret-sync-controller/Chart.yaml
 	@sed -E -i 's/^appVersion: .*/appVersion: "$(VERSION)"/' charts/secret-sync-controller/Chart.yaml
+	@sed -E -i 's|^[[:space:]]*image: .*|          image: $(IMAGE_NAME):$(VERSION)|' deploy/base/deployment.yaml
 	@echo "Set version to $(VERSION)"
 
 scan-image: docker-build-local ## Scan local container image with Trivy
