@@ -1,5 +1,5 @@
 # Build artifacts
-/vcluster-secret-sync-controller
+/secret-sync-controller
 *.exe
 *.exe~
 *.dll
