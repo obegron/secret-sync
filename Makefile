@@ -108,6 +108,7 @@ integration-up: check-tools ## Create local k3d + controller integration environ
 	kubectl create namespace "$(SOURCE_NAMESPACE)" --dry-run=client -o yaml | kubectl apply -f -; \
 	kubectl create namespace "$(CLUSTER_TARGET_NAMESPACE)" --dry-run=client -o yaml | kubectl apply -f -; \
 	kubectl create namespace "$(CLUSTER_TARGET_NAMESPACE_2)" --dry-run=client -o yaml | kubectl apply -f -; \
+	kubectl -n "$(SOURCE_NAMESPACE)" delete secret "$(SOURCE_SECRET_NAME)" --ignore-not-found; \
 	kubectl -n "$(SOURCE_NAMESPACE)" create secret generic "$(SOURCE_SECRET_NAME)" \
 		--from-literal=username=appuser \
 		--from-literal=password=supersecret \
@@ -118,7 +119,7 @@ integration-up: check-tools ## Create local k3d + controller integration environ
 		obegron.github.io/secret-sync-targets="$$TARGETS_JSON" \
 		obegron.github.io/force-sync-ts="$$FORCE_TS" \
 		obegron.github.io/delete-policy=delete --overwrite; \
-	kubectl -n "$(SOURCE_NAMESPACE)" label secret "$(SOURCE_SECRET_NAME)" obegron.github.io/secret-sync-enabled=true --overwrite
+	kubectl -n "$(SOURCE_NAMESPACE)" patch secret "$(SOURCE_SECRET_NAME)" --type merge -p '{"metadata":{"labels":{"obegron.github.io/secret-sync-enabled":"true"}}}'
 
 integration-test: integration-up ## Run full integration test and validate synced secret data
 	@set -euo pipefail; \
@@ -210,7 +211,7 @@ integration-test-pull: integration-up ## Run pull-mode integration test with sta
 		--from-literal=username=pulluser \
 		--from-literal=password=pullsecret \
 		--dry-run=client -o yaml | kubectl apply -f -; \
-	kubectl -n "$(SOURCE_NAMESPACE)" label secret "$$PULL_SECRET_NAME" obegron.github.io/secret-sync-enabled=true --overwrite; \
+	kubectl -n "$(SOURCE_NAMESPACE)" patch secret "$$PULL_SECRET_NAME" --type merge -p '{"metadata":{"labels":{"obegron.github.io/secret-sync-enabled":"true"}}}'; \
 	kubectl -n "$(SOURCE_NAMESPACE)" annotate secret "$$PULL_SECRET_NAME" obegron.github.io/delete-policy=delete --overwrite; \
 	for i in $$(seq 1 30); do \
 		if kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" >/dev/null 2>&1; then \

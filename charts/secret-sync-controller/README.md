@@ -31,3 +31,8 @@ helm template secret-sync-controller \
   ./charts/secret-sync-controller \
   --namespace secret-sync-system
 ```
+
+RBAC behavior by mode:
+
+- `controller.syncMode=push`: chart renders `ClusterRole` + `ClusterRoleBinding`.
+- `controller.syncMode=pull`: chart renders namespace-scoped `Role` + `RoleBinding` in the release namespace.

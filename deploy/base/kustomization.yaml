@@ -3,6 +3,6 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - ../rbac/serviceaccount.yaml
-  - ../rbac/clusterrole.yaml
-  - ../rbac/clusterrolebinding.yaml
+  - ../rbac/rbac-role.yaml
+  - ../rbac/rbac-binding.yaml
   - deployment.yaml
