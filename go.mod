@@ -1,6 +1,6 @@
 module secret-sync-controller
 
-go 1.26.0
+go 1.26.1
 
 require (
 	k8s.io/api v0.35.2
