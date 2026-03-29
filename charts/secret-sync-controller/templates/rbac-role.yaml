@@ -1,4 +1,15 @@
 {{- if .Values.rbac.create }}
+{{- if eq .Values.controller.syncMode "source" }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "secret-sync-controller.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+{{- else }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -10,4 +21,5 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create"]
+{{- end }}
 {{- end }}

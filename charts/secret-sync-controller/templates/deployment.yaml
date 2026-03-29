@@ -25,6 +25,8 @@ spec:
                   fieldPath: metadata.namespace
             - name: SYNC_MODE
               value: {{ .Values.controller.syncMode | quote }}
+            - name: SOURCE_PROVIDER
+              value: {{ .Values.controller.sourceProvider | quote }}
             - name: HOST_KUBECONFIG
               value: {{ .Values.controller.hostKubeconfig | quote }}
             - name: SOURCE_NAMESPACE
@@ -37,6 +39,22 @@ spec:
               value: {{ .Values.controller.hostTokenFile | quote }}
             - name: HOST_CA_FILE
               value: {{ .Values.controller.hostCAFile | quote }}
+            - name: BRIDGE_BASE_URL
+              value: {{ .Values.controller.bridgeBaseURL | quote }}
+            - name: BRIDGE_TOKEN_FILE
+              value: {{ .Values.controller.bridgeTokenFile | quote }}
+            - name: BRIDGE_CA_FILE
+              value: {{ .Values.controller.bridgeCAFile | quote }}
+            - name: BRIDGE_POLL_INTERVAL
+              value: {{ .Values.controller.bridgePollInterval | quote }}
+            - name: BRIDGE_TRUST_ISSUERS
+              value: {{ .Values.controller.bridgeTrustIssuers | quote }}
+            - name: BRIDGE_ALLOWED_SUBJECTS
+              value: {{ .Values.controller.bridgeAllowedSubjects | quote }}
+            - name: OIDC_PROXY_ENABLED
+              value: {{ .Values.controller.oidcProxyEnabled | quote }}
+            - name: OIDC_PROXY_BASE_URL
+              value: {{ .Values.controller.oidcProxyBaseURL | quote }}
             - name: DEFAULT_DELETE_POLICY
               value: {{ .Values.controller.defaultDeletePolicy | quote }}
             - name: PULL_NAMESPACE_ISOLATION

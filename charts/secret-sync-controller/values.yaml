@@ -20,12 +20,21 @@ rbac:
 
 controller:
   syncMode: push
+  sourceProvider: kubernetes
   hostKubeconfig: ""
   sourceNamespace: ""
   targetNamespace: ""
   hostAPIServer: ""
   hostTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
   hostCAFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+  bridgeBaseURL: ""
+  bridgeTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+  bridgeCAFile: ""
+  bridgePollInterval: 15s
+  bridgeTrustIssuers: ""
+  bridgeAllowedSubjects: ""
+  oidcProxyEnabled: false
+  oidcProxyBaseURL: ""
   defaultDeletePolicy: delete
   pullNamespaceIsolation: false
   allowedSyncTargets: ""
@@ -45,6 +54,10 @@ probes:
     failureThreshold: 3
 
 resources: {}
+service:
+  enabled: true
+  type: ClusterIP
+  port: 8080
 extraEnv: []
 extraVolumes: []
 extraVolumeMounts: []

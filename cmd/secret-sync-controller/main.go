@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -33,6 +34,10 @@ const (
 	controllerName = "secret-sync-controller"
 	modePush       = "push"
 	modePull       = "pull"
+	modeSource     = "source"
+
+	sourceProviderKubernetes = "kubernetes"
+	sourceProviderBridge     = "bridge"
 
 	labelSyncEnabled = "obegron.github.io/secret-sync-enabled"
 	annSyncTargets   = "obegron.github.io/secret-sync-targets"
@@ -54,6 +59,7 @@ const (
 
 type runtimeConfig struct {
 	syncMode               string
+	sourceProvider         string
 	hostKubeconfig         string
 	hostAPIServer          string
 	hostTokenFile          string
@@ -64,6 +70,14 @@ type runtimeConfig struct {
 	defaultDeletePolicy    string
 	metricsBindAddress     string
 	pullNamespaceIsolation bool
+	bridgeBaseURL          string
+	bridgeTokenFile        string
+	bridgeCAFile           string
+	bridgePollInterval     time.Duration
+	bridgeTrustIssuers     []string
+	bridgeAllowedSubjects  map[string]struct{}
+	oidcProxyEnabled       bool
+	oidcProxyBaseURL       string
 }
 
 type syncTarget struct {
@@ -97,6 +111,8 @@ type controller struct {
 	allowedTargetIDs map[string]struct{}
 	ready            atomic.Bool
 	metrics          metricsState
+	bridgeVerifier   *bridgeVerifier
+	bridgeHTTPClient *http.Client
 }
 
 type metricsState struct {
@@ -131,8 +147,13 @@ func main() {
 	log.Printf("starting %s version %s", controllerName, Version)
 
 	syncMode := strings.ToLower(strings.TrimSpace(envOrDefault("SYNC_MODE", modePush)))
-	if syncMode != modePush && syncMode != modePull {
-		log.Fatalf("invalid SYNC_MODE %q (expected %q or %q)", syncMode, modePush, modePull)
+	if syncMode != modePush && syncMode != modePull && syncMode != modeSource {
+		log.Fatalf("invalid SYNC_MODE %q (expected %q, %q or %q)", syncMode, modePush, modePull, modeSource)
+	}
+
+	sourceProvider := strings.ToLower(strings.TrimSpace(envOrDefault("SOURCE_PROVIDER", sourceProviderKubernetes)))
+	if sourceProvider != sourceProviderKubernetes && sourceProvider != sourceProviderBridge {
+		log.Fatalf("invalid SOURCE_PROVIDER %q (expected %q or %q)", sourceProvider, sourceProviderKubernetes, sourceProviderBridge)
 	}
 
 	pullNamespaceIsolation, err := parseBoolEnv("PULL_NAMESPACE_ISOLATION", false)
@@ -160,6 +181,7 @@ func main() {
 
 	cfg := runtimeConfig{
 		syncMode:               syncMode,
+		sourceProvider:         sourceProvider,
 		hostKubeconfig:         os.Getenv("HOST_KUBECONFIG"),
 		hostAPIServer:          strings.TrimSpace(os.Getenv("HOST_API_SERVER")),
 		hostTokenFile:          envOrDefault("HOST_TOKEN_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/token"),
@@ -170,15 +192,38 @@ func main() {
 		defaultDeletePolicy:    normalizeDeletePolicy(envOrDefault("DEFAULT_DELETE_POLICY", "delete")),
 		metricsBindAddress:     envOrDefault("METRICS_BIND_ADDRESS", ":8080"),
 		pullNamespaceIsolation: pullNamespaceIsolation,
+		bridgeBaseURL:          strings.TrimSpace(os.Getenv("BRIDGE_BASE_URL")),
+		bridgeTokenFile:        envOrDefault("BRIDGE_TOKEN_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/token"),
+		bridgeCAFile:           strings.TrimSpace(os.Getenv("BRIDGE_CA_FILE")),
+		bridgeTrustIssuers:     splitCSV(os.Getenv("BRIDGE_TRUST_ISSUERS")),
+		bridgeAllowedSubjects:  splitCSVSet(os.Getenv("BRIDGE_ALLOWED_SUBJECTS")),
+		oidcProxyBaseURL:       strings.TrimSpace(os.Getenv("OIDC_PROXY_BASE_URL")),
+	}
+	cfg.oidcProxyEnabled, err = parseBoolEnv("OIDC_PROXY_ENABLED", false)
+	if err != nil {
+		log.Fatalf("invalid OIDC_PROXY_ENABLED: %v", err)
+	}
+	cfg.bridgePollInterval, err = parseDurationEnv("BRIDGE_POLL_INTERVAL", 15*time.Second)
+	if err != nil {
+		log.Fatalf("invalid BRIDGE_POLL_INTERVAL: %v", err)
 	}
 	if cfg.targetNamespace == "" {
 		cfg.targetNamespace = cfg.podNamespace
 	}
-	if cfg.syncMode == modePull && strings.TrimSpace(cfg.sourceNamespace) == "" {
-		log.Fatal("SYNC_MODE=pull requires SOURCE_NAMESPACE")
+	if (cfg.syncMode == modePull || cfg.syncMode == modeSource) && strings.TrimSpace(cfg.sourceNamespace) == "" {
+		log.Fatal("SYNC_MODE=pull or SYNC_MODE=source requires SOURCE_NAMESPACE")
 	}
 	if cfg.syncMode == modePull && strings.TrimSpace(cfg.targetNamespace) == "" {
 		log.Fatal("SYNC_MODE=pull requires TARGET_NAMESPACE or POD_NAMESPACE")
+	}
+	if cfg.syncMode == modePull && cfg.sourceProvider == sourceProviderBridge && cfg.bridgeBaseURL == "" {
+		log.Fatal("SOURCE_PROVIDER=bridge requires BRIDGE_BASE_URL")
+	}
+	if cfg.syncMode == modeSource && len(cfg.bridgeTrustIssuers) == 0 {
+		log.Fatal("SYNC_MODE=source requires BRIDGE_TRUST_ISSUERS")
+	}
+	if cfg.oidcProxyEnabled && cfg.oidcProxyBaseURL == "" {
+		log.Fatal("OIDC_PROXY_ENABLED=true requires OIDC_PROXY_BASE_URL")
 	}
 
 	if cfg.syncMode == modePull && cfg.sourceNamespace == cfg.targetNamespace {
@@ -189,9 +234,10 @@ func main() {
 	}
 
 	var hostRest *rest.Config
-	if cfg.syncMode == modePull {
+	switch {
+	case cfg.syncMode == modePull && cfg.sourceProvider == sourceProviderKubernetes:
 		hostRest, err = loadHostPullConfig(cfg.hostKubeconfig, cfg.hostAPIServer, cfg.hostTokenFile, cfg.hostCAFile)
-	} else {
+	default:
 		hostRest, err = loadConfig(cfg.hostKubeconfig)
 	}
 	if err != nil {
@@ -202,13 +248,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("build host client: %v", err)
 	}
-	localRest, err := rest.InClusterConfig()
-	if err != nil {
-		log.Fatalf("build local in-cluster config: %v", err)
-	}
-	localClient, err := kubernetes.NewForConfig(localRest)
-	if err != nil {
-		log.Fatalf("build local client: %v", err)
+	var localClient kubernetes.Interface
+	if cfg.syncMode != modeSource {
+		localRest, localErr := rest.InClusterConfig()
+		if localErr != nil {
+			log.Fatalf("build local in-cluster config: %v", localErr)
+		}
+		localClient, err = kubernetes.NewForConfig(localRest)
+		if err != nil {
+			log.Fatalf("build local client: %v", err)
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -220,16 +269,41 @@ func main() {
 		cfg:              cfg,
 		allowedTargetIDs: allowedTargetIDs,
 	}
+	if cfg.syncMode == modeSource {
+		c.bridgeVerifier, err = newBridgeVerifier(cfg.bridgeTrustIssuers, cfg.bridgeAllowedSubjects)
+		if err != nil {
+			log.Fatalf("build bridge verifier: %v", err)
+		}
+	}
+	if cfg.syncMode == modePull && cfg.sourceProvider == sourceProviderBridge {
+		c.bridgeHTTPClient, err = newBridgeHTTPClient(cfg.bridgeCAFile, cfg.bridgeTokenFile)
+		if err != nil {
+			log.Fatalf("build bridge client: %v", err)
+		}
+	}
 	go c.serveHTTP(ctx)
 	c.run(ctx)
 }
 
 func (c *controller) run(ctx context.Context) {
+	if c.cfg.syncMode == modeSource {
+		c.runSource(ctx)
+		return
+	}
 	if c.cfg.syncMode == modePull {
+		if c.cfg.sourceProvider == sourceProviderBridge {
+			c.runPullBridge(ctx)
+			return
+		}
 		c.runPull(ctx)
 		return
 	}
 	c.runPush(ctx)
+}
+
+func (c *controller) runSource(ctx context.Context) {
+	c.ready.Store(true)
+	<-ctx.Done()
 }
 
 func (c *controller) runPush(ctx context.Context) {
@@ -862,6 +936,10 @@ func (c *controller) emitNormalEvent(ctx context.Context, src *corev1.Secret, re
 }
 
 func (c *controller) emitEvent(ctx context.Context, src *corev1.Secret, eventType, reason, message string) {
+	if c.cfg.syncMode == modePull && c.cfg.sourceProvider == sourceProviderBridge {
+		return
+	}
+
 	event := &corev1.Event{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: fmt.Sprintf("%s-", src.Name),
@@ -904,6 +982,9 @@ func (c *controller) serveHTTP(ctx context.Context) {
 	mux.HandleFunc("/readyz", c.handleReadyz)
 	mux.HandleFunc("/version", c.handleVersion)
 	mux.HandleFunc("/metrics", c.handleMetrics)
+	mux.HandleFunc("/bridge/v1/secrets", c.handleBridgeList)
+	mux.HandleFunc("/.well-known/openid-configuration", c.handleOIDCConfigProxy)
+	mux.HandleFunc("/openid/v1/jwks", c.handleJWKSProxy)
 
 	server := &http.Server{
 		Addr:    c.cfg.metricsBindAddress,
