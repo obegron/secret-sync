@@ -68,12 +68,17 @@ func bridgeSecretFromCore(secret *corev1.Secret) bridgeSecret {
 func (c *controller) runPullBridge(ctx context.Context) {
 	known := map[string]*corev1.Secret{}
 	for {
+		start := time.Now()
 		next, err := c.syncBridgePull(ctx, known)
 		if err != nil {
 			c.metrics.reconcileErrors.Add(1)
+			c.metrics.bridgePollErrors.Add(1)
+			c.recordError("bridge_poll_failed")
 			log.Printf("bridge pull sync failed: %v", err)
 		} else {
 			known = next
+			c.metrics.bridgePollSuccess.Add(1)
+			c.recordSuccess(time.Since(start))
 			c.ready.Store(true)
 		}
 

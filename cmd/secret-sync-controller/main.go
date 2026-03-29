@@ -110,6 +110,7 @@ type controller struct {
 	localClient      kubernetes.Interface
 	cfg              runtimeConfig
 	allowedTargetIDs map[string]struct{}
+	startedAt        time.Time
 	ready            atomic.Bool
 	metrics          metricsState
 	bridgeVerifier   *bridgeVerifier
@@ -128,6 +129,12 @@ type metricsState struct {
 	eventNormalTotal   atomic.Uint64
 	eventWarningTotal  atomic.Uint64
 	eventErrorTotal    atomic.Uint64
+	bridgePollSuccess  atomic.Uint64
+	bridgePollErrors   atomic.Uint64
+	lastSuccessUnix    atomic.Int64
+	lastErrorUnix      atomic.Int64
+	lastDurationNanos  atomic.Int64
+	lastErrorCategory  atomic.Value
 }
 
 type pullQueueAction string
@@ -266,6 +273,7 @@ func main() {
 		localClient:      localClient,
 		cfg:              cfg,
 		allowedTargetIDs: allowedTargetIDs,
+		startedAt:        time.Now(),
 	}
 	if cfg.syncMode == modeSource && len(cfg.bridgeTrustIssuers) > 0 {
 		c.bridgeVerifier, err = newBridgeVerifier(cfg.bridgeTrustIssuers, cfg.bridgeAllowedSubjects)
@@ -318,9 +326,13 @@ func (c *controller) runPush(ctx context.Context) {
 			if !ok {
 				return
 			}
+			start := time.Now()
 			if err := c.reconcile(ctx, sec); err != nil {
 				c.metrics.reconcileErrors.Add(1)
+				c.recordError("push_reconcile_failed")
 				log.Printf("reconcile add %s/%s failed: %v", sec.Namespace, sec.Name, err)
+			} else {
+				c.recordSuccess(time.Since(start))
 			}
 		},
 		UpdateFunc: func(_, newObj interface{}) {
@@ -328,9 +340,13 @@ func (c *controller) runPush(ctx context.Context) {
 			if !ok {
 				return
 			}
+			start := time.Now()
 			if err := c.reconcile(ctx, sec); err != nil {
 				c.metrics.reconcileErrors.Add(1)
+				c.recordError("push_reconcile_failed")
 				log.Printf("reconcile update %s/%s failed: %v", sec.Namespace, sec.Name, err)
+			} else {
+				c.recordSuccess(time.Since(start))
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
@@ -345,9 +361,13 @@ func (c *controller) runPush(ctx context.Context) {
 					return
 				}
 			}
+			start := time.Now()
 			if err := c.handleDelete(ctx, sec); err != nil {
 				c.metrics.deleteErrors.Add(1)
+				c.recordError("push_delete_failed")
 				log.Printf("handle delete %s/%s failed: %v", sec.Namespace, sec.Name, err)
+			} else {
+				c.recordSuccess(time.Since(start))
 			}
 		},
 	})
@@ -454,6 +474,7 @@ func (c *controller) processNextPullItem(ctx context.Context, queue workqueue.Ty
 	var err error
 	switch item.action {
 	case pullActionReconcile:
+		start := time.Now()
 		key := fmt.Sprintf("%s/%s", item.namespace, item.name)
 		obj, exists, getErr := indexer.GetByKey(key)
 		if getErr != nil {
@@ -473,14 +494,21 @@ func (c *controller) processNextPullItem(ctx context.Context, queue workqueue.Ty
 		err = c.reconcilePull(ctx, sec)
 		if err != nil {
 			c.metrics.reconcileErrors.Add(1)
+			c.recordError("pull_reconcile_failed")
 			log.Printf("reconcile pull %s failed: %v", key, err)
+		} else {
+			c.recordSuccess(time.Since(start))
 		}
 	case pullActionDelete:
 		if item.secret != nil {
+			start := time.Now()
 			err = c.handleDeletePull(ctx, item.secret)
 			if err != nil {
 				c.metrics.deleteErrors.Add(1)
+				c.recordError("pull_delete_failed")
 				log.Printf("handle pull delete %s/%s failed: %v", item.namespace, item.name, err)
+			} else {
+				c.recordSuccess(time.Since(start))
 			}
 		}
 	default:
@@ -934,6 +962,18 @@ func (c *controller) emitWarningEvent(ctx context.Context, src *corev1.Secret, r
 	c.emitEvent(ctx, src, corev1.EventTypeWarning, reason, message)
 }
 
+func (c *controller) recordSuccess(duration time.Duration) {
+	c.metrics.lastSuccessUnix.Store(time.Now().Unix())
+	c.metrics.lastDurationNanos.Store(duration.Nanoseconds())
+}
+
+func (c *controller) recordError(category string) {
+	c.metrics.lastErrorUnix.Store(time.Now().Unix())
+	if strings.TrimSpace(category) != "" {
+		c.metrics.lastErrorCategory.Store(category)
+	}
+}
+
 func (c *controller) logReconcileAction(action string, src *corev1.Secret, targetID, targetNamespace, targetName string) {
 	if !c.cfg.logReconcileActions {
 		return
@@ -999,6 +1039,7 @@ func (c *controller) serveHTTP(ctx context.Context) {
 	mux.HandleFunc("/healthz", c.handleHealthz)
 	mux.HandleFunc("/readyz", c.handleReadyz)
 	mux.HandleFunc("/version", c.handleVersion)
+	mux.HandleFunc("/status", c.handleStatus)
 	mux.HandleFunc("/metrics", c.handleMetrics)
 	mux.HandleFunc("/bridge/v1/secrets", c.handleBridgeList)
 	mux.HandleFunc("/.well-known/openid-configuration", c.handleOIDCConfigProxy)
@@ -1039,6 +1080,42 @@ func (c *controller) handleVersion(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte(Version + "\n"))
 }
 
+func (c *controller) handleStatus(w http.ResponseWriter, _ *http.Request) {
+	var lastError string
+	if value := c.metrics.lastErrorCategory.Load(); value != nil {
+		lastError, _ = value.(string)
+	}
+
+	payload := map[string]interface{}{
+		"service":                controllerName,
+		"version":                Version,
+		"uptime_seconds":         time.Since(c.startedAt).Seconds(),
+		"ready":                  c.ready.Load(),
+		"sync_mode":              c.cfg.syncMode,
+		"source_provider":        c.cfg.sourceProvider,
+		"source_namespace":       c.cfg.sourceNamespace,
+		"target_namespace":       c.cfg.targetNamespace,
+		"bridge_base_url":        c.cfg.bridgeBaseURL,
+		"last_success_unixtime":  c.metrics.lastSuccessUnix.Load(),
+		"last_error_unixtime":    c.metrics.lastErrorUnix.Load(),
+		"last_error_category":    lastError,
+		"last_duration_seconds":  float64(c.metrics.lastDurationNanos.Load()) / float64(time.Second),
+		"reconcile_total":        c.metrics.reconcileTotal.Load(),
+		"reconcile_errors_total": c.metrics.reconcileErrors.Load(),
+		"delete_total":           c.metrics.deleteTotal.Load(),
+		"delete_errors_total":    c.metrics.deleteErrors.Load(),
+		"sync_created_total":     c.metrics.syncCreatedTotal.Load(),
+		"sync_updated_total":     c.metrics.syncUpdatedTotal.Load(),
+		"sync_recreated_total":   c.metrics.syncRecreatedTotal.Load(),
+		"sync_deleted_total":     c.metrics.syncDeletedTotal.Load(),
+		"bridge_poll_successes":  c.metrics.bridgePollSuccess.Load(),
+		"bridge_poll_errors":     c.metrics.bridgePollErrors.Load(),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
 func (c *controller) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	fmt.Fprintf(w, "secret_sync_reconcile_total %d\n", c.metrics.reconcileTotal.Load())
@@ -1052,6 +1129,20 @@ func (c *controller) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintf(w, "secret_sync_event_normal_total %d\n", c.metrics.eventNormalTotal.Load())
 	fmt.Fprintf(w, "secret_sync_event_warning_total %d\n", c.metrics.eventWarningTotal.Load())
 	fmt.Fprintf(w, "secret_sync_event_error_total %d\n", c.metrics.eventErrorTotal.Load())
+	fmt.Fprintf(w, "secret_sync_bridge_poll_success_total %d\n", c.metrics.bridgePollSuccess.Load())
+	fmt.Fprintf(w, "secret_sync_bridge_poll_error_total %d\n", c.metrics.bridgePollErrors.Load())
+	fmt.Fprintf(w, "secret_sync_last_success_unixtime %d\n", c.metrics.lastSuccessUnix.Load())
+	fmt.Fprintf(w, "secret_sync_last_error_unixtime %d\n", c.metrics.lastErrorUnix.Load())
+	fmt.Fprintf(w, "secret_sync_last_duration_seconds %f\n", float64(c.metrics.lastDurationNanos.Load())/float64(time.Second))
+	fmt.Fprintf(w, "secret_sync_ready %d\n", boolToMetric(c.ready.Load()))
+	fmt.Fprintf(w, "secret_sync_mode_info{mode=%q,source_provider=%q} 1\n", c.cfg.syncMode, c.cfg.sourceProvider)
+}
+
+func boolToMetric(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func loadConfig(kubeconfig string) (*rest.Config, error) {

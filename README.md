@@ -43,7 +43,7 @@ Optional annotation:
 - `DEFAULT_DELETE_POLICY` (`delete` or `retain`, default `delete`)
 - `PULL_NAMESPACE_ISOLATION` (`true|false`, default `false`; pull mode only)
 - `ALLOWED_SYNC_TARGETS` (optional JSON array allowlist; applies to push targets and pull targets)
-- `METRICS_BIND_ADDRESS` (default `:8080`; serves `/healthz`, `/readyz`, `/version`, `/metrics`)
+- `METRICS_BIND_ADDRESS` (default `:8080`; serves `/healthz`, `/readyz`, `/version`, `/status`, `/metrics`)
 
 ## Sync behavior
 
@@ -229,6 +229,15 @@ If you want success-path logs while setting this up manually, enable:
 --set-string controller.logReconcileActions=true
 ```
 
+You can also inspect basic runtime state without reading logs:
+
+```bash
+curl -fsS "http://$HOST_GATEWAY_IP:$VCLUSTER_BRIDGE_PORT/status"
+curl -fsS "http://$HOST_GATEWAY_IP:$VCLUSTER_BRIDGE_PORT/metrics"
+curl -fsS "http://$HOST_GATEWAY_IP:$VCLUSTER_OIDC_PORT/status"
+curl -fsS "http://$HOST_GATEWAY_IP:$VCLUSTER_OIDC_PORT/metrics"
+```
+
 Manual smoke test for host namespace -> `vcluster` sync:
 
 ```bash
@@ -255,6 +264,8 @@ kubectl -n "$SOURCE_NAMESPACE" get pods
 kubectl -n "$SOURCE_NAMESPACE" logs deploy/secret-sync-source
 kubectl -n "$VCLUSTER_NAMESPACE" get pods
 kubectl -n "$VCLUSTER_NAMESPACE" logs pod/$(kubectl -n "$VCLUSTER_NAMESPACE" get pods -o name | grep secret-sync-controller | head -n1)
+curl -fsS "http://$HOST_GATEWAY_IP:$VCLUSTER_BRIDGE_PORT/status"
+curl -fsS "http://$HOST_GATEWAY_IP:$VCLUSTER_OIDC_PORT/status"
 KUBECONFIG="$VCLUSTER_KUBECONFIG" kubectl -n "$TARGET_NAMESPACE" get secrets
 ```
 
