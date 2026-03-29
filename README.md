@@ -147,6 +147,11 @@ make run-oidc-helper
 
 The test mounts a host-cluster kubeconfig into the controller pod so it can watch source Secrets on the host cluster while writing synced Secrets into namespaces inside the vcluster.
 
+The automated target uses this default source flow:
+
+- source secret on the host cluster in `tenant-host-ns`
+- target secret inside the `vcluster` in `shared-runtime` and `shared-runtime-2`
+
 ## Manual vcluster test
 
 Start from the working automated setup:
@@ -161,6 +166,11 @@ That target creates:
 - the Helm-installed `vcluster`
 - the `secret-sync-controller` release inside the `vcluster`
 - `.tmp/integration/vcluster.kubeconfig`
+
+After that, you can manually test a different source flow, for example:
+
+- source secret on the host cluster in `secret-sync-vcluster`
+- target secret inside the `vcluster` in `shared-runtime`
 
 If you want to reconnect to the `vcluster` manually later, re-export the defaults:
 
@@ -190,7 +200,30 @@ KUBECONFIG="$VCLUSTER_KUBECONFIG" kubectl get namespaces
 KUBECONFIG="$VCLUSTER_KUBECONFIG" kubectl -n secret-sync-vcluster-system get pods
 ```
 
-Manual smoke test for host namespace -> `vcluster` sync:
+If you want the controller to watch the same host namespace where the `vcluster` itself runs, redeploy it with:
+
+```bash
+KUBECONFIG="$VCLUSTER_KUBECONFIG" helm upgrade --install secret-sync-controller ./charts/secret-sync-controller \
+  --namespace secret-sync-vcluster-system \
+  --create-namespace \
+  --set-string image.repository=secret-sync-controller \
+  --set-string image.tag=it \
+  --set-string controller.syncMode=pull \
+  --set-string controller.hostKubeconfig=/etc/secret-sync-host/config \
+  --set-string controller.sourceNamespace=secret-sync-vcluster \
+  --set-string controller.targetNamespace=shared-runtime \
+  --set-string extraEnv[0].name=KUBERNETES_SERVICE_HOST \
+  --set-string extraEnv[0].value="$(kubectl -n secret-sync-vcluster get endpoints secret-sync-vcluster -o jsonpath='{.subsets[0].addresses[0].ip}')" \
+  --set-string extraEnv[1].name=KUBERNETES_SERVICE_PORT \
+  --set-string extraEnv[1].value=8443 \
+  --set-string extraVolumes[0].name=host-access \
+  --set-string extraVolumes[0].secret.secretName=secret-sync-host-access \
+  --set-string extraVolumeMounts[0].name=host-access \
+  --set-string extraVolumeMounts[0].mountPath=/etc/secret-sync-host \
+  --set extraVolumeMounts[0].readOnly=true
+```
+
+Manual smoke test for `secret-sync-vcluster` host namespace -> `vcluster` sync:
 
 ```bash
 kubectl -n "$SOURCE_NAMESPACE" create secret generic app-db-secret \

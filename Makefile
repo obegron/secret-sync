@@ -26,6 +26,7 @@ CONTROLLER_NAMESPACE ?= secret-sync-system
 VCLUSTER_NAME ?= secret-sync-vcluster
 VCLUSTER_NAMESPACE ?= secret-sync-vcluster
 VCLUSTER_CONNECT_PORT ?= 18443
+VCLUSTER_ASSERT_PORT ?= 18444
 VCLUSTER_KUBECONFIG ?= $(INTEGRATION_TMP_DIR)/vcluster.kubeconfig
 VCLUSTER_CONTROLLER_NAMESPACE ?= secret-sync-vcluster-system
 VCLUSTER_CONTROLLER_RELEASE ?= secret-sync-controller
@@ -340,6 +341,7 @@ integration-test-vcluster: check-tools ## Run pull-mode integration test from a 
 	HOST_PULL_TOKEN=$$(kubectl -n "$(SOURCE_NAMESPACE)" create token "$(VCLUSTER_HOST_ACCESS_SA)"); \
 	HOST_CA_DATA=$$(kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}'); \
 	HOST_API_IP=$$(kubectl get service kubernetes -n default -o jsonpath='{.spec.clusterIP}'); \
+	VCLUSTER_API_IP=$$(kubectl -n "$(VCLUSTER_NAMESPACE)" get endpoints "$(VCLUSTER_NAME)" -o jsonpath='{.subsets[0].addresses[0].ip}'); \
 	printf '%s\n' \
 		'apiVersion: v1' \
 		'kind: Config' \
@@ -377,9 +379,9 @@ integration-test-vcluster: check-tools ## Run pull-mode integration test from a 
 		--set-string controller.sourceNamespace="$(SOURCE_NAMESPACE)" \
 		--set-string controller.targetNamespace="$(CLUSTER_TARGET_NAMESPACE)" \
 		--set-string extraEnv[0].name=KUBERNETES_SERVICE_HOST \
-		--set-string extraEnv[0].value="$(VCLUSTER_NAME).$(VCLUSTER_NAMESPACE).svc" \
+		--set-string extraEnv[0].value="$$VCLUSTER_API_IP" \
 		--set-string extraEnv[1].name=KUBERNETES_SERVICE_PORT \
-		--set-string extraEnv[1].value=443 \
+		--set-string extraEnv[1].value=8443 \
 		--set-string extraVolumes[0].name=host-access \
 		--set-string extraVolumes[0].secret.secretName="$(VCLUSTER_HOST_ACCESS_SECRET)" \
 		--set-string extraVolumeMounts[0].name=host-access \
@@ -411,17 +413,29 @@ integration-test-vcluster: check-tools ## Run pull-mode integration test from a 
 	kubectl -n "$(SOURCE_NAMESPACE)" annotate secret "$$PULL_SECRET_NAME" \
 		obegron.github.io/secret-sync-targets="$$PULL_TARGETS_JSON" \
 		obegron.github.io/delete-policy=delete --overwrite; \
+	kubectl -n "$(VCLUSTER_NAMESPACE)" port-forward service/"$(VCLUSTER_NAME)" "$(VCLUSTER_ASSERT_PORT)":443 > "$(INTEGRATION_TMP_DIR)/port-forward-vcluster-assert.log" 2>&1 & \
+	ASSERT_PF_PID=$$!; \
+	trap 'kill $$ASSERT_PF_PID >/dev/null 2>&1 || true; kill $$CONTROLLER_PF_PID >/dev/null 2>&1 || true; kill $$VCLUSTER_PF_PID >/dev/null 2>&1 || true' EXIT; \
+	sed -E 's#server: https://[^[:space:]]+#server: https://localhost:$(VCLUSTER_ASSERT_PORT)#' "$(INTEGRATION_TMP_DIR)/vcluster.raw.kubeconfig" > "$(INTEGRATION_TMP_DIR)/vcluster.assert.kubeconfig"; \
 	for i in $$(seq 1 30); do \
-		if kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" >/dev/null 2>&1 && \
-		   kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PULL_SECRET_NAME" >/dev/null 2>&1; then \
+		if KUBECONFIG="$(INTEGRATION_TMP_DIR)/vcluster.assert.kubeconfig" kubectl get namespace "$(CLUSTER_TARGET_NAMESPACE)" >/dev/null 2>&1; then \
+			break; \
+		fi; \
+		sleep 1; \
+	done; \
+	KUBECONFIG="$(INTEGRATION_TMP_DIR)/vcluster.assert.kubeconfig" kubectl get namespace "$(CLUSTER_TARGET_NAMESPACE)" >/dev/null; \
+	KUBECONFIG="$(INTEGRATION_TMP_DIR)/vcluster.assert.kubeconfig" kubectl get namespace "$(CLUSTER_TARGET_NAMESPACE_2)" >/dev/null; \
+	for i in $$(seq 1 30); do \
+		if KUBECONFIG="$(INTEGRATION_TMP_DIR)/vcluster.assert.kubeconfig" kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" >/dev/null 2>&1 && \
+		   KUBECONFIG="$(INTEGRATION_TMP_DIR)/vcluster.assert.kubeconfig" kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PULL_SECRET_NAME" >/dev/null 2>&1; then \
 			break; \
 		fi; \
 		sleep 2; \
 	done; \
-	vc_user=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.username}' | base64 -d); \
-	vc_pw=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d); \
-	vc_user2=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.username}' | base64 -d); \
-	vc_pw2=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d); \
+	vc_user=$$(KUBECONFIG="$(INTEGRATION_TMP_DIR)/vcluster.assert.kubeconfig" kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.username}' | base64 -d); \
+	vc_pw=$$(KUBECONFIG="$(INTEGRATION_TMP_DIR)/vcluster.assert.kubeconfig" kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d); \
+	vc_user2=$$(KUBECONFIG="$(INTEGRATION_TMP_DIR)/vcluster.assert.kubeconfig" kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.username}' | base64 -d); \
+	vc_pw2=$$(KUBECONFIG="$(INTEGRATION_TMP_DIR)/vcluster.assert.kubeconfig" kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d); \
 	[ "$$vc_user" = "vclusteruser" ]; \
 	[ "$$vc_pw" = "vclustersecret" ]; \
 	[ "$$vc_user2" = "vclusteruser" ]; \
@@ -429,28 +443,29 @@ integration-test-vcluster: check-tools ## Run pull-mode integration test from a 
 	pw_b64=$$(printf 'vclustersecret2' | base64 | tr -d '\n'); \
 	kubectl -n "$(SOURCE_NAMESPACE)" patch secret "$$PULL_SECRET_NAME" --type merge -p "{\"data\":{\"password\":\"$$pw_b64\"}}"; \
 	for i in $$(seq 1 30); do \
-		vc_pw3=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d 2>/dev/null || true); \
-		vc_pw4=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d 2>/dev/null || true); \
+		vc_pw3=$$(KUBECONFIG="$(INTEGRATION_TMP_DIR)/vcluster.assert.kubeconfig" kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d 2>/dev/null || true); \
+		vc_pw4=$$(KUBECONFIG="$(INTEGRATION_TMP_DIR)/vcluster.assert.kubeconfig" kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d 2>/dev/null || true); \
 		if [ "$$vc_pw3" = "vclustersecret2" ] && [ "$$vc_pw4" = "vclustersecret2" ]; then \
 			break; \
 		fi; \
 		sleep 2; \
 	done; \
-	vc_pw3=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d); \
-	vc_pw4=$$(kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d); \
+	vc_pw3=$$(KUBECONFIG="$(INTEGRATION_TMP_DIR)/vcluster.assert.kubeconfig" kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d); \
+	vc_pw4=$$(KUBECONFIG="$(INTEGRATION_TMP_DIR)/vcluster.assert.kubeconfig" kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PULL_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d); \
 	[ "$$vc_pw3" = "vclustersecret2" ]; \
 	[ "$$vc_pw4" = "vclustersecret2" ]; \
 	kubectl -n "$(SOURCE_NAMESPACE)" delete secret "$$PULL_SECRET_NAME"; \
 	for i in $$(seq 1 30); do \
-		if ! kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" >/dev/null 2>&1 && \
-		   ! kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PULL_SECRET_NAME" >/dev/null 2>&1; then \
+		if ! KUBECONFIG="$(INTEGRATION_TMP_DIR)/vcluster.assert.kubeconfig" kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" >/dev/null 2>&1 && \
+		   ! KUBECONFIG="$(INTEGRATION_TMP_DIR)/vcluster.assert.kubeconfig" kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PULL_SECRET_NAME" >/dev/null 2>&1; then \
 			break; \
 		fi; \
 		sleep 2; \
 	done; \
-	! kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" >/dev/null 2>&1; \
-	! kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PULL_SECRET_NAME" >/dev/null 2>&1; \
+	! KUBECONFIG="$(INTEGRATION_TMP_DIR)/vcluster.assert.kubeconfig" kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PULL_SECRET_NAME" >/dev/null 2>&1; \
+	! KUBECONFIG="$(INTEGRATION_TMP_DIR)/vcluster.assert.kubeconfig" kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PULL_SECRET_NAME" >/dev/null 2>&1; \
 	echo "integration vcluster test passed"; \
+	kill $$ASSERT_PF_PID >/dev/null 2>&1 || true; \
 	kill $$CONTROLLER_PF_PID >/dev/null 2>&1 || true; \
 	kill $$VCLUSTER_PF_PID >/dev/null 2>&1 || true; \
 	trap - EXIT
