@@ -16,7 +16,7 @@ spec:
       serviceAccountName: secret-sync-controller
       containers:
         - name: controller
-          image: docker.io/obegron/secret-sync-controller:0.2.0
+          image: docker.io/obegron/secret-sync-controller:0.3.0
           imagePullPolicy: IfNotPresent
           env:
             - name: POD_NAMESPACE
