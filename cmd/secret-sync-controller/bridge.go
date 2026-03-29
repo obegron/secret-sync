@@ -66,11 +66,13 @@ func (c *controller) runPullBridge(ctx context.Context) {
 			c.metrics.reconcileErrors.Add(1)
 			c.metrics.bridgePollErrors.Add(1)
 			c.recordError("bridge_poll_failed")
+			c.logVerbosef("bridge poll failed baseURL=%s: %v", c.cfg.bridgeBaseURL, err)
 			log.Printf("bridge pull sync failed: %v", err)
 		} else {
 			known = next
 			c.metrics.bridgePollSuccess.Add(1)
 			c.recordSuccess(time.Since(start))
+			c.logVerbosef("bridge poll succeeded baseURL=%s secrets=%d", c.cfg.bridgeBaseURL, len(next))
 			c.ready.Store(true)
 		}
 
@@ -164,6 +166,7 @@ func (c *controller) handleBridgeList(w http.ResponseWriter, r *http.Request) {
 	for i := range secrets.Items {
 		secret := &secrets.Items[i]
 		if secret.Labels[labelSyncEnabled] != "true" {
+			c.logVerbosef("skip bridge source secret=%s/%s: %s is %q", secret.Namespace, secret.Name, labelSyncEnabled, secret.Labels[labelSyncEnabled])
 			continue
 		}
 		payload.Items = append(payload.Items, bridgeSecretFromCore(secret))

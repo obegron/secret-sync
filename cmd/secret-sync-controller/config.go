@@ -15,6 +15,7 @@ import (
 type runtimeConfig struct {
 	syncMode               string
 	sourceProvider         string
+	logVerbose             bool
 	logReconcileActions    bool
 	hostKubeconfig         string
 	hostAPIServer          string
@@ -94,6 +95,10 @@ func loadRuntimeConfig() (runtimeConfig, map[string]struct{}, error) {
 	cfg.logReconcileActions, err = parseBoolEnv("LOG_RECONCILE_ACTIONS", false)
 	if err != nil {
 		return runtimeConfig{}, nil, fmt.Errorf("invalid LOG_RECONCILE_ACTIONS: %w", err)
+	}
+	cfg.logVerbose, err = parseBoolEnv("LOG_VERBOSE", false)
+	if err != nil {
+		return runtimeConfig{}, nil, fmt.Errorf("invalid LOG_VERBOSE: %w", err)
 	}
 	cfg.oidcProxyEnabled, err = parseBoolEnv("OIDC_PROXY_ENABLED", false)
 	if err != nil {

@@ -21,6 +21,7 @@ rbac:
 controller:
   syncMode: push
   sourceProvider: kubernetes
+  logVerbose: false
   logReconcileActions: false
   hostKubeconfig: ""
   sourceNamespace: ""

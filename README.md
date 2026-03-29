@@ -44,6 +44,7 @@ Optional annotation:
 - `PULL_NAMESPACE_ISOLATION` (`true|false`, default `false`; pull mode only)
 - `ALLOWED_SYNC_TARGETS` (optional JSON array allowlist; applies to push targets and pull targets)
 - `METRICS_BIND_ADDRESS` (default `:8080`; serves `/healthz`, `/readyz`, `/version`, `/status`, `/metrics`)
+- `LOG_VERBOSE` (default `false`; opt-in troubleshooting logs for skipped secrets, invalid annotations, blocked targets, policy fallback, and unchanged syncs)
 
 ## Sync behavior
 
@@ -227,6 +228,12 @@ If you want success-path logs while setting this up manually, enable:
 
 ```bash
 --set-string controller.logReconcileActions=true
+```
+
+If you want broader troubleshooting logs, enable:
+
+```bash
+--set-string controller.logVerbose=true
 ```
 
 You can also inspect basic runtime state without reading logs:

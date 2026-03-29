@@ -43,6 +43,7 @@ func (t syncTarget) targetName(sourceName string) string {
 
 func (c *controller) reconcile(ctx context.Context, src *corev1.Secret) error {
 	if src.Labels[labelSyncEnabled] != "true" {
+		c.logVerbosef("skip reconcile source=%s/%s: %s is %q", src.Namespace, src.Name, labelSyncEnabled, src.Labels[labelSyncEnabled])
 		return nil
 	}
 	c.metrics.reconcileTotal.Add(1)
@@ -50,6 +51,7 @@ func (c *controller) reconcile(ctx context.Context, src *corev1.Secret) error {
 	targets, err := parseTargets(src.Annotations[annSyncTargets])
 	if err != nil {
 		msg := fmt.Sprintf("invalid %s annotation: %v", annSyncTargets, err)
+		c.logVerbosef("reject reconcile source=%s/%s: %s", src.Namespace, src.Name, msg)
 		c.emitWarningEvent(ctx, src, eventReasonConfigInvalid, msg)
 		return errors.New(msg)
 	}
@@ -62,6 +64,7 @@ func (c *controller) reconcile(ctx context.Context, src *corev1.Secret) error {
 	var errs []string
 	for _, target := range targets {
 		if targetErr := c.validateTargetForSource(src, target); targetErr != nil {
+			c.logVerbosef("block target source=%s/%s target=%s: %v", src.Namespace, src.Name, target.ID(), targetErr)
 			c.emitWarningEvent(ctx, src, eventReasonTargetBlocked, targetErr.Error())
 			errs = append(errs, targetErr.Error())
 			continue
@@ -81,6 +84,7 @@ func (c *controller) reconcile(ctx context.Context, src *corev1.Secret) error {
 
 func (c *controller) reconcilePull(ctx context.Context, src *corev1.Secret) error {
 	if src.Labels[labelSyncEnabled] != "true" {
+		c.logVerbosef("skip pull reconcile source=%s/%s: %s is %q", src.Namespace, src.Name, labelSyncEnabled, src.Labels[labelSyncEnabled])
 		return nil
 	}
 	c.metrics.reconcileTotal.Add(1)
@@ -88,6 +92,7 @@ func (c *controller) reconcilePull(ctx context.Context, src *corev1.Secret) erro
 	targets, err := c.resolvePullTargets(src)
 	if err != nil {
 		msg := fmt.Sprintf("invalid pull targets for %s/%s: %v", src.Namespace, src.Name, err)
+		c.logVerbosef("reject pull reconcile source=%s/%s: %s", src.Namespace, src.Name, msg)
 		c.emitWarningEvent(ctx, src, eventReasonConfigInvalid, msg)
 		return errors.New(msg)
 	}
@@ -100,6 +105,7 @@ func (c *controller) reconcilePull(ctx context.Context, src *corev1.Secret) erro
 	var errs []string
 	for _, target := range targets {
 		if targetErr := c.validatePullTarget(src, target); targetErr != nil {
+			c.logVerbosef("block pull target source=%s/%s target=%s: %v", src.Namespace, src.Name, target.ID(), targetErr)
 			c.emitWarningEvent(ctx, src, eventReasonTargetBlocked, targetErr.Error())
 			errs = append(errs, targetErr.Error())
 			continue
@@ -151,6 +157,7 @@ func (c *controller) reconcileIntoNamespace(ctx context.Context, targetClient ku
 		_, createErr := targetClient.CoreV1().Secrets(targetNamespace).Create(ctx, desired, metav1.CreateOptions{})
 		if apierrors.IsNotFound(createErr) {
 			msg := fmt.Sprintf("target namespace %q not found for %q", targetNamespace, targetID)
+			c.logVerbosef("target missing source=%s/%s target=%s: %s", src.Namespace, src.Name, targetID, msg)
 			c.emitWarningEvent(ctx, src, eventReasonTargetMissing, msg)
 			return errors.New(msg)
 		}
@@ -164,11 +171,13 @@ func (c *controller) reconcileIntoNamespace(ctx context.Context, targetClient ku
 
 	if err := ensureManagedTarget(existing, expectedSourceRef); err != nil {
 		msg := fmt.Sprintf("target %q ownership conflict: %v", targetID, err)
+		c.logVerbosef("ownership conflict source=%s/%s target=%s: %s", src.Namespace, src.Name, targetID, msg)
 		c.emitWarningEvent(ctx, src, eventReasonTargetOwned, msg)
 		return errors.New(msg)
 	}
 
 	if existing.Annotations[annChecksum] == checksum {
+		c.logVerbosef("skip update source=%s/%s target=%s targetSecret=%s/%s: checksum unchanged", src.Namespace, src.Name, targetID, targetNamespace, targetName)
 		return nil
 	}
 
@@ -200,15 +209,21 @@ func (c *controller) reconcileIntoNamespace(ctx context.Context, targetClient ku
 
 func (c *controller) handleDelete(ctx context.Context, src *corev1.Secret) error {
 	if src.Labels[labelSyncEnabled] != "true" {
+		c.logVerbosef("skip delete source=%s/%s: %s is %q", src.Namespace, src.Name, labelSyncEnabled, src.Labels[labelSyncEnabled])
 		return nil
 	}
 	c.metrics.deleteTotal.Add(1)
 
-	deletePolicy := normalizeDeletePolicy(src.Annotations[annDeletePolicy])
+	rawDeletePolicy := src.Annotations[annDeletePolicy]
+	deletePolicy := normalizeDeletePolicy(rawDeletePolicy)
+	if strings.TrimSpace(rawDeletePolicy) != "" && deletePolicy == "" {
+		c.logVerbosef("invalid delete policy source=%s/%s: %q, falling back to default %q", src.Namespace, src.Name, rawDeletePolicy, c.cfg.defaultDeletePolicy)
+	}
 	if deletePolicy == "" {
 		deletePolicy = c.cfg.defaultDeletePolicy
 	}
 	if deletePolicy == "retain" {
+		c.logVerbosef("retain delete source=%s/%s due to delete policy %q", src.Namespace, src.Name, deletePolicy)
 		return nil
 	}
 
@@ -242,6 +257,7 @@ func (c *controller) handleDelete(ctx context.Context, src *corev1.Secret) error
 		expectedSourceRef := fmt.Sprintf("%s/%s", src.Namespace, src.Name)
 		if err := ensureManagedTarget(existing, expectedSourceRef); err != nil {
 			msg := fmt.Sprintf("target %q ownership conflict: %v", target.ID(), err)
+			c.logVerbosef("ownership conflict on delete source=%s/%s target=%s: %s", src.Namespace, src.Name, target.ID(), msg)
 			c.emitWarningEvent(ctx, src, eventReasonTargetOwned, msg)
 			errs = append(errs, msg)
 			continue
@@ -267,15 +283,21 @@ func (c *controller) handleDelete(ctx context.Context, src *corev1.Secret) error
 
 func (c *controller) handleDeletePull(ctx context.Context, src *corev1.Secret) error {
 	if src.Labels[labelSyncEnabled] != "true" {
+		c.logVerbosef("skip pull delete source=%s/%s: %s is %q", src.Namespace, src.Name, labelSyncEnabled, src.Labels[labelSyncEnabled])
 		return nil
 	}
 	c.metrics.deleteTotal.Add(1)
 
-	deletePolicy := normalizeDeletePolicy(src.Annotations[annDeletePolicy])
+	rawDeletePolicy := src.Annotations[annDeletePolicy]
+	deletePolicy := normalizeDeletePolicy(rawDeletePolicy)
+	if strings.TrimSpace(rawDeletePolicy) != "" && deletePolicy == "" {
+		c.logVerbosef("invalid pull delete policy source=%s/%s: %q, falling back to default %q", src.Namespace, src.Name, rawDeletePolicy, c.cfg.defaultDeletePolicy)
+	}
 	if deletePolicy == "" {
 		deletePolicy = c.cfg.defaultDeletePolicy
 	}
 	if deletePolicy == "retain" {
+		c.logVerbosef("retain pull delete source=%s/%s due to delete policy %q", src.Namespace, src.Name, deletePolicy)
 		return nil
 	}
 
@@ -303,6 +325,7 @@ func (c *controller) handleDeletePull(ctx context.Context, src *corev1.Secret) e
 		expectedSourceRef := fmt.Sprintf("%s/%s", src.Namespace, src.Name)
 		if err := ensureManagedTarget(existing, expectedSourceRef); err != nil {
 			msg := fmt.Sprintf("target %q ownership conflict: %v", target.ID(), err)
+			c.logVerbosef("ownership conflict on pull delete source=%s/%s target=%s: %s", src.Namespace, src.Name, target.ID(), msg)
 			c.emitWarningEvent(ctx, src, eventReasonTargetOwned, msg)
 			errs = append(errs, msg)
 			continue
@@ -490,6 +513,13 @@ func (c *controller) logReconcileAction(action string, src *corev1.Secret, targe
 		targetNamespace,
 		targetName,
 	)
+}
+
+func (c *controller) logVerbosef(format string, args ...interface{}) {
+	if !c.cfg.logVerbose {
+		return
+	}
+	log.Printf(format, args...)
 }
 
 func (c *controller) emitNormalEvent(ctx context.Context, src *corev1.Secret, reason, message string) {
