@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"os/signal"
 	"strings"
 	"sync/atomic"
@@ -24,7 +23,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/workqueue"
 )
 
@@ -56,30 +54,6 @@ const (
 	eventReasonCreated       = "SyncCreated"
 	eventReasonUpdated       = "SyncUpdated"
 )
-
-type runtimeConfig struct {
-	syncMode               string
-	sourceProvider         string
-	logReconcileActions    bool
-	hostKubeconfig         string
-	hostAPIServer          string
-	hostTokenFile          string
-	hostCAFile             string
-	podNamespace           string
-	sourceNamespace        string
-	targetNamespace        string
-	defaultDeletePolicy    string
-	metricsBindAddress     string
-	pullNamespaceIsolation bool
-	bridgeBaseURL          string
-	bridgeTokenFile        string
-	bridgeCAFile           string
-	bridgePollInterval     time.Duration
-	bridgeTrustIssuers     []string
-	bridgeAllowedSubjects  map[string]struct{}
-	oidcProxyEnabled       bool
-	oidcProxyBaseURL       string
-}
 
 type syncTarget struct {
 	Kind      string `json:"kind"`
@@ -117,26 +91,6 @@ type controller struct {
 	bridgeHTTPClient *http.Client
 }
 
-type metricsState struct {
-	reconcileTotal     atomic.Uint64
-	reconcileErrors    atomic.Uint64
-	deleteTotal        atomic.Uint64
-	deleteErrors       atomic.Uint64
-	syncCreatedTotal   atomic.Uint64
-	syncUpdatedTotal   atomic.Uint64
-	syncRecreatedTotal atomic.Uint64
-	syncDeletedTotal   atomic.Uint64
-	eventNormalTotal   atomic.Uint64
-	eventWarningTotal  atomic.Uint64
-	eventErrorTotal    atomic.Uint64
-	bridgePollSuccess  atomic.Uint64
-	bridgePollErrors   atomic.Uint64
-	lastSuccessUnix    atomic.Int64
-	lastErrorUnix      atomic.Int64
-	lastDurationNanos  atomic.Int64
-	lastErrorCategory  atomic.Value
-}
-
 type pullQueueAction string
 
 const (
@@ -154,88 +108,9 @@ type pullQueueItem struct {
 func main() {
 	log.Printf("starting %s version %s", controllerName, Version)
 
-	syncMode := strings.ToLower(strings.TrimSpace(envOrDefault("SYNC_MODE", modePush)))
-	if syncMode != modePush && syncMode != modePull && syncMode != modeSource {
-		log.Fatalf("invalid SYNC_MODE %q (expected %q, %q or %q)", syncMode, modePush, modePull, modeSource)
-	}
-
-	sourceProvider := strings.ToLower(strings.TrimSpace(envOrDefault("SOURCE_PROVIDER", sourceProviderKubernetes)))
-	if sourceProvider != sourceProviderKubernetes && sourceProvider != sourceProviderBridge {
-		log.Fatalf("invalid SOURCE_PROVIDER %q (expected %q or %q)", sourceProvider, sourceProviderKubernetes, sourceProviderBridge)
-	}
-
-	pullNamespaceIsolation, err := parseBoolEnv("PULL_NAMESPACE_ISOLATION", false)
+	cfg, allowedTargetIDs, err := loadRuntimeConfig()
 	if err != nil {
-		log.Fatalf("invalid PULL_NAMESPACE_ISOLATION: %v", err)
-	}
-
-	podNamespace := strings.TrimSpace(os.Getenv("POD_NAMESPACE"))
-	sourceNamespace := strings.TrimSpace(os.Getenv("SOURCE_NAMESPACE"))
-	if sourceNamespace == "" && pullNamespaceIsolation {
-		sourceNamespace = podNamespace
-	}
-
-	if pullNamespaceIsolation && sourceNamespace == "" {
-		log.Fatal("PULL_NAMESPACE_ISOLATION requires SOURCE_NAMESPACE (or POD_NAMESPACE)")
-	}
-	if pullNamespaceIsolation && podNamespace != "" && sourceNamespace != podNamespace {
-		log.Fatalf("PULL_NAMESPACE_ISOLATION requires SOURCE_NAMESPACE (%q) to match POD_NAMESPACE (%q)", sourceNamespace, podNamespace)
-	}
-
-	allowedTargetIDs, err := parseAllowedTargetIDs(os.Getenv("ALLOWED_SYNC_TARGETS"))
-	if err != nil {
-		log.Fatalf("invalid ALLOWED_SYNC_TARGETS: %v", err)
-	}
-
-	cfg := runtimeConfig{
-		syncMode:               syncMode,
-		sourceProvider:         sourceProvider,
-		hostKubeconfig:         os.Getenv("HOST_KUBECONFIG"),
-		hostAPIServer:          strings.TrimSpace(os.Getenv("HOST_API_SERVER")),
-		hostTokenFile:          envOrDefault("HOST_TOKEN_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/token"),
-		hostCAFile:             envOrDefault("HOST_CA_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"),
-		podNamespace:           podNamespace,
-		sourceNamespace:        sourceNamespace,
-		targetNamespace:        strings.TrimSpace(os.Getenv("TARGET_NAMESPACE")),
-		defaultDeletePolicy:    normalizeDeletePolicy(envOrDefault("DEFAULT_DELETE_POLICY", "delete")),
-		metricsBindAddress:     envOrDefault("METRICS_BIND_ADDRESS", ":8080"),
-		pullNamespaceIsolation: pullNamespaceIsolation,
-		bridgeBaseURL:          strings.TrimSpace(os.Getenv("BRIDGE_BASE_URL")),
-		bridgeTokenFile:        envOrDefault("BRIDGE_TOKEN_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/token"),
-		bridgeCAFile:           strings.TrimSpace(os.Getenv("BRIDGE_CA_FILE")),
-		bridgeTrustIssuers:     splitCSV(os.Getenv("BRIDGE_TRUST_ISSUERS")),
-		bridgeAllowedSubjects:  splitCSVSet(os.Getenv("BRIDGE_ALLOWED_SUBJECTS")),
-		oidcProxyBaseURL:       strings.TrimSpace(os.Getenv("OIDC_PROXY_BASE_URL")),
-	}
-	cfg.logReconcileActions, err = parseBoolEnv("LOG_RECONCILE_ACTIONS", false)
-	if err != nil {
-		log.Fatalf("invalid LOG_RECONCILE_ACTIONS: %v", err)
-	}
-	cfg.oidcProxyEnabled, err = parseBoolEnv("OIDC_PROXY_ENABLED", false)
-	if err != nil {
-		log.Fatalf("invalid OIDC_PROXY_ENABLED: %v", err)
-	}
-	cfg.bridgePollInterval, err = parseDurationEnv("BRIDGE_POLL_INTERVAL", 15*time.Second)
-	if err != nil {
-		log.Fatalf("invalid BRIDGE_POLL_INTERVAL: %v", err)
-	}
-	if cfg.targetNamespace == "" {
-		cfg.targetNamespace = cfg.podNamespace
-	}
-	if (cfg.syncMode == modePull || cfg.syncMode == modeSource) && strings.TrimSpace(cfg.sourceNamespace) == "" {
-		log.Fatal("SYNC_MODE=pull or SYNC_MODE=source requires SOURCE_NAMESPACE")
-	}
-	if cfg.syncMode == modePull && strings.TrimSpace(cfg.targetNamespace) == "" {
-		log.Fatal("SYNC_MODE=pull requires TARGET_NAMESPACE or POD_NAMESPACE")
-	}
-	if cfg.syncMode == modePull && cfg.sourceProvider == sourceProviderBridge && cfg.bridgeBaseURL == "" {
-		log.Fatal("SOURCE_PROVIDER=bridge requires BRIDGE_BASE_URL")
-	}
-	if cfg.syncMode == modePull && cfg.sourceNamespace == cfg.targetNamespace {
-		// If HOST_API_SERVER is empty and HOST_KUBECONFIG is empty, it's definitely the same cluster.
-		if cfg.hostAPIServer == "" && cfg.hostKubeconfig == "" {
-			log.Fatalf("invalid configuration: SOURCE_NAMESPACE and TARGET_NAMESPACE cannot be the same (%q) when running in pull mode on the same cluster", cfg.sourceNamespace)
-		}
+		log.Fatal(err)
 	}
 
 	var hostRest *rest.Config
@@ -962,18 +837,6 @@ func (c *controller) emitWarningEvent(ctx context.Context, src *corev1.Secret, r
 	c.emitEvent(ctx, src, corev1.EventTypeWarning, reason, message)
 }
 
-func (c *controller) recordSuccess(duration time.Duration) {
-	c.metrics.lastSuccessUnix.Store(time.Now().Unix())
-	c.metrics.lastDurationNanos.Store(duration.Nanoseconds())
-}
-
-func (c *controller) recordError(category string) {
-	c.metrics.lastErrorUnix.Store(time.Now().Unix())
-	if strings.TrimSpace(category) != "" {
-		c.metrics.lastErrorCategory.Store(category)
-	}
-}
-
 func (c *controller) logReconcileAction(action string, src *corev1.Secret, targetID, targetNamespace, targetName string) {
 	if !c.cfg.logReconcileActions {
 		return
@@ -1061,136 +924,6 @@ func (c *controller) serveHTTP(ctx context.Context) {
 	}
 }
 
-func (c *controller) handleHealthz(w http.ResponseWriter, _ *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok\n"))
-}
-
-func (c *controller) handleReadyz(w http.ResponseWriter, _ *http.Request) {
-	if !c.ready.Load() {
-		http.Error(w, "not ready\n", http.StatusServiceUnavailable)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok\n"))
-}
-
-func (c *controller) handleVersion(w http.ResponseWriter, _ *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(Version + "\n"))
-}
-
-func (c *controller) handleStatus(w http.ResponseWriter, _ *http.Request) {
-	var lastError string
-	if value := c.metrics.lastErrorCategory.Load(); value != nil {
-		lastError, _ = value.(string)
-	}
-
-	payload := map[string]interface{}{
-		"service":                controllerName,
-		"version":                Version,
-		"uptime_seconds":         time.Since(c.startedAt).Seconds(),
-		"ready":                  c.ready.Load(),
-		"sync_mode":              c.cfg.syncMode,
-		"source_provider":        c.cfg.sourceProvider,
-		"source_namespace":       c.cfg.sourceNamespace,
-		"target_namespace":       c.cfg.targetNamespace,
-		"bridge_base_url":        c.cfg.bridgeBaseURL,
-		"last_success_unixtime":  c.metrics.lastSuccessUnix.Load(),
-		"last_error_unixtime":    c.metrics.lastErrorUnix.Load(),
-		"last_error_category":    lastError,
-		"last_duration_seconds":  float64(c.metrics.lastDurationNanos.Load()) / float64(time.Second),
-		"reconcile_total":        c.metrics.reconcileTotal.Load(),
-		"reconcile_errors_total": c.metrics.reconcileErrors.Load(),
-		"delete_total":           c.metrics.deleteTotal.Load(),
-		"delete_errors_total":    c.metrics.deleteErrors.Load(),
-		"sync_created_total":     c.metrics.syncCreatedTotal.Load(),
-		"sync_updated_total":     c.metrics.syncUpdatedTotal.Load(),
-		"sync_recreated_total":   c.metrics.syncRecreatedTotal.Load(),
-		"sync_deleted_total":     c.metrics.syncDeletedTotal.Load(),
-		"bridge_poll_successes":  c.metrics.bridgePollSuccess.Load(),
-		"bridge_poll_errors":     c.metrics.bridgePollErrors.Load(),
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(payload)
-}
-
-func (c *controller) handleMetrics(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	fmt.Fprintf(w, "secret_sync_reconcile_total %d\n", c.metrics.reconcileTotal.Load())
-	fmt.Fprintf(w, "secret_sync_reconcile_errors_total %d\n", c.metrics.reconcileErrors.Load())
-	fmt.Fprintf(w, "secret_sync_delete_total %d\n", c.metrics.deleteTotal.Load())
-	fmt.Fprintf(w, "secret_sync_delete_errors_total %d\n", c.metrics.deleteErrors.Load())
-	fmt.Fprintf(w, "secret_sync_created_total %d\n", c.metrics.syncCreatedTotal.Load())
-	fmt.Fprintf(w, "secret_sync_updated_total %d\n", c.metrics.syncUpdatedTotal.Load())
-	fmt.Fprintf(w, "secret_sync_recreated_total %d\n", c.metrics.syncRecreatedTotal.Load())
-	fmt.Fprintf(w, "secret_sync_deleted_total %d\n", c.metrics.syncDeletedTotal.Load())
-	fmt.Fprintf(w, "secret_sync_event_normal_total %d\n", c.metrics.eventNormalTotal.Load())
-	fmt.Fprintf(w, "secret_sync_event_warning_total %d\n", c.metrics.eventWarningTotal.Load())
-	fmt.Fprintf(w, "secret_sync_event_error_total %d\n", c.metrics.eventErrorTotal.Load())
-	fmt.Fprintf(w, "secret_sync_bridge_poll_success_total %d\n", c.metrics.bridgePollSuccess.Load())
-	fmt.Fprintf(w, "secret_sync_bridge_poll_error_total %d\n", c.metrics.bridgePollErrors.Load())
-	fmt.Fprintf(w, "secret_sync_last_success_unixtime %d\n", c.metrics.lastSuccessUnix.Load())
-	fmt.Fprintf(w, "secret_sync_last_error_unixtime %d\n", c.metrics.lastErrorUnix.Load())
-	fmt.Fprintf(w, "secret_sync_last_duration_seconds %f\n", float64(c.metrics.lastDurationNanos.Load())/float64(time.Second))
-	fmt.Fprintf(w, "secret_sync_ready %d\n", boolToMetric(c.ready.Load()))
-	fmt.Fprintf(w, "secret_sync_mode_info{mode=%q,source_provider=%q} 1\n", c.cfg.syncMode, c.cfg.sourceProvider)
-}
-
-func boolToMetric(value bool) int {
-	if value {
-		return 1
-	}
-	return 0
-}
-
-func loadConfig(kubeconfig string) (*rest.Config, error) {
-	if strings.TrimSpace(kubeconfig) == "" {
-		cfg, err := rest.InClusterConfig()
-		if err == nil {
-			return cfg, nil
-		}
-		return nil, fmt.Errorf("in-cluster config failed and no kubeconfig provided: %w", err)
-	}
-	return clientcmd.BuildConfigFromFlags("", kubeconfig)
-}
-
-func loadHostPullConfig(kubeconfig, hostAPIServer, tokenFile, caFile string) (*rest.Config, error) {
-	if strings.TrimSpace(kubeconfig) != "" {
-		return loadConfig(kubeconfig)
-	}
-	if strings.TrimSpace(hostAPIServer) == "" {
-		cfg, err := rest.InClusterConfig()
-		if err == nil {
-			return cfg, nil
-		}
-		return nil, fmt.Errorf("in-cluster config failed and HOST_API_SERVER is not set: %w", err)
-	}
-	if strings.TrimSpace(tokenFile) == "" {
-		return nil, errors.New("HOST_TOKEN_FILE is required when HOST_KUBECONFIG is not set")
-	}
-
-	tokenBytes, err := os.ReadFile(tokenFile)
-	if err != nil {
-		return nil, fmt.Errorf("read HOST_TOKEN_FILE %q: %w", tokenFile, err)
-	}
-	token := strings.TrimSpace(string(tokenBytes))
-	if token == "" {
-		return nil, fmt.Errorf("HOST_TOKEN_FILE %q is empty", tokenFile)
-	}
-
-	cfg := &rest.Config{
-		Host:            hostAPIServer,
-		BearerToken:     token,
-		BearerTokenFile: tokenFile,
-		TLSClientConfig: rest.TLSClientConfig{
-			CAFile: caFile,
-		},
-	}
-	return cfg, nil
-}
-
 func secretChecksum(secret *corev1.Secret) (string, error) {
 	payload := struct {
 		Type      corev1.SecretType `json:"type"`
@@ -1208,45 +941,4 @@ func secretChecksum(secret *corev1.Secret) (string, error) {
 	}
 	h := sha256.Sum256(raw)
 	return hex.EncodeToString(h[:]), nil
-}
-
-func envOrDefault(name, fallback string) string {
-	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
-		return v
-	}
-	return fallback
-}
-
-func parseBoolEnv(name string, fallback bool) (bool, error) {
-	raw := strings.TrimSpace(os.Getenv(name))
-	if raw == "" {
-		return fallback, nil
-	}
-
-	switch strings.ToLower(raw) {
-	case "1", "true", "t", "yes", "y", "on":
-		return true, nil
-	case "0", "false", "f", "no", "n", "off":
-		return false, nil
-	default:
-		return false, fmt.Errorf("unsupported boolean value %q", raw)
-	}
-}
-
-func normalizeDeletePolicy(v string) string {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "retain":
-		return "retain"
-	case "delete":
-		return "delete"
-	default:
-		return ""
-	}
-}
-
-func namespaceOrAll(ns string) string {
-	if strings.TrimSpace(ns) == "" {
-		return metav1.NamespaceAll
-	}
-	return ns
 }
