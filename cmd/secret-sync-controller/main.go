@@ -60,6 +60,7 @@ const (
 type runtimeConfig struct {
 	syncMode               string
 	sourceProvider         string
+	logReconcileActions    bool
 	hostKubeconfig         string
 	hostAPIServer          string
 	hostTokenFile          string
@@ -198,6 +199,10 @@ func main() {
 		bridgeTrustIssuers:     splitCSV(os.Getenv("BRIDGE_TRUST_ISSUERS")),
 		bridgeAllowedSubjects:  splitCSVSet(os.Getenv("BRIDGE_ALLOWED_SUBJECTS")),
 		oidcProxyBaseURL:       strings.TrimSpace(os.Getenv("OIDC_PROXY_BASE_URL")),
+	}
+	cfg.logReconcileActions, err = parseBoolEnv("LOG_RECONCILE_ACTIONS", false)
+	if err != nil {
+		log.Fatalf("invalid LOG_RECONCILE_ACTIONS: %v", err)
 	}
 	cfg.oidcProxyEnabled, err = parseBoolEnv("OIDC_PROXY_ENABLED", false)
 	if err != nil {
@@ -609,6 +614,7 @@ func (c *controller) reconcileIntoNamespace(ctx context.Context, targetClient ku
 		if createErr == nil {
 			c.metrics.syncCreatedTotal.Add(1)
 			c.emitNormalEvent(ctx, src, eventReasonCreated, fmt.Sprintf("synced secret to %s", targetID))
+			c.logReconcileAction("created", src, targetID, targetNamespace, targetName)
 		}
 		return createErr
 	}
@@ -631,6 +637,7 @@ func (c *controller) reconcileIntoNamespace(ctx context.Context, targetClient ku
 		if createErr == nil {
 			c.metrics.syncRecreatedTotal.Add(1)
 			c.emitNormalEvent(ctx, src, eventReasonUpdated, fmt.Sprintf("recreated immutable secret in %s", targetID))
+			c.logReconcileAction("recreated", src, targetID, targetNamespace, targetName)
 		}
 		return createErr
 	}
@@ -643,6 +650,7 @@ func (c *controller) reconcileIntoNamespace(ctx context.Context, targetClient ku
 	if updateErr == nil {
 		c.metrics.syncUpdatedTotal.Add(1)
 		c.emitNormalEvent(ctx, src, eventReasonUpdated, fmt.Sprintf("updated synced secret in %s", targetID))
+		c.logReconcileAction("updated", src, targetID, targetNamespace, targetName)
 	}
 	return updateErr
 }
@@ -699,6 +707,7 @@ func (c *controller) handleDelete(ctx context.Context, src *corev1.Secret) error
 		delErr := targetClient.CoreV1().Secrets(target.Namespace).Delete(ctx, targetName, metav1.DeleteOptions{})
 		if delErr == nil {
 			c.metrics.syncDeletedTotal.Add(1)
+			c.logReconcileAction("deleted", src, target.ID(), target.Namespace, targetName)
 			continue
 		}
 		if !apierrors.IsNotFound(delErr) {
@@ -759,6 +768,7 @@ func (c *controller) handleDeletePull(ctx context.Context, src *corev1.Secret) e
 		delErr := c.localClient.CoreV1().Secrets(target.Namespace).Delete(ctx, targetName, metav1.DeleteOptions{})
 		if delErr == nil {
 			c.metrics.syncDeletedTotal.Add(1)
+			c.logReconcileAction("deleted", src, target.ID(), target.Namespace, targetName)
 			continue
 		}
 		if !apierrors.IsNotFound(delErr) {
@@ -922,6 +932,21 @@ func parseAllowedTargetIDs(raw string) (map[string]struct{}, error) {
 
 func (c *controller) emitWarningEvent(ctx context.Context, src *corev1.Secret, reason, message string) {
 	c.emitEvent(ctx, src, corev1.EventTypeWarning, reason, message)
+}
+
+func (c *controller) logReconcileAction(action string, src *corev1.Secret, targetID, targetNamespace, targetName string) {
+	if !c.cfg.logReconcileActions {
+		return
+	}
+	log.Printf(
+		"reconcile %s source=%s/%s target=%s targetSecret=%s/%s",
+		action,
+		src.Namespace,
+		src.Name,
+		targetID,
+		targetNamespace,
+		targetName,
+	)
 }
 
 func (c *controller) emitNormalEvent(ctx context.Context, src *corev1.Secret, reason, message string) {

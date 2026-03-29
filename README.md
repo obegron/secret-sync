@@ -223,6 +223,12 @@ echo "bridge: http://$HOST_GATEWAY_IP:$VCLUSTER_BRIDGE_PORT"
 echo "oidc:   http://$HOST_GATEWAY_IP:$VCLUSTER_OIDC_PORT"
 ```
 
+If you want success-path logs while setting this up manually, enable:
+
+```bash
+--set-string controller.logReconcileActions=true
+```
+
 Manual smoke test for host namespace -> `vcluster` sync:
 
 ```bash

@@ -27,6 +27,8 @@ spec:
               value: {{ .Values.controller.syncMode | quote }}
             - name: SOURCE_PROVIDER
               value: {{ .Values.controller.sourceProvider | quote }}
+            - name: LOG_RECONCILE_ACTIONS
+              value: {{ .Values.controller.logReconcileActions | quote }}
             - name: HOST_KUBECONFIG
               value: {{ .Values.controller.hostKubeconfig | quote }}
             - name: SOURCE_NAMESPACE
