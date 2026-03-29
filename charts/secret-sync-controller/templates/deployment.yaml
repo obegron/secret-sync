@@ -25,6 +25,8 @@ spec:
                   fieldPath: metadata.namespace
             - name: SYNC_MODE
               value: {{ .Values.controller.syncMode | quote }}
+            - name: HOST_KUBECONFIG
+              value: {{ .Values.controller.hostKubeconfig | quote }}
             - name: SOURCE_NAMESPACE
               value: {{ .Values.controller.sourceNamespace | quote }}
             - name: TARGET_NAMESPACE
@@ -43,6 +45,9 @@ spec:
               value: {{ .Values.controller.allowedSyncTargets | quote }}
             - name: METRICS_BIND_ADDRESS
               value: {{ .Values.controller.metricsBindAddress | quote }}
+{{- with .Values.extraEnv }}
+{{ toYaml . | indent 12 }}
+{{- end }}
 {{- if .Values.probes.enabled }}
           livenessProbe:
             httpGet:
@@ -63,6 +68,14 @@ spec:
 {{- end }}
           resources:
 {{ toYaml .Values.resources | indent 12 }}
+{{- with .Values.extraVolumeMounts }}
+          volumeMounts:
+{{ toYaml . | indent 12 }}
+{{- end }}
+{{- with .Values.extraVolumes }}
+      volumes:
+{{ toYaml . | indent 8 }}
+{{- end }}
 {{- with .Values.nodeSelector }}
       nodeSelector:
 {{ toYaml . | indent 8 }}

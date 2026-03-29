@@ -102,6 +102,7 @@ make scan-image
 ```bash
 make integration-test
 make integration-test-pull
+make integration-test-vcluster
 make integration-test-collision
 make integration-down
 ```
@@ -138,6 +139,163 @@ Build/run:
 ```bash
 make build-oidc-helper
 make run-oidc-helper
+```
+
+## Helm-only vcluster integration
+
+`make integration-test-vcluster` creates a `vcluster` via the official Helm chart, extracts the generated kubeconfig from the `vc-<release>` Secret, port-forwards the vcluster API locally, and deploys `secret-sync-controller` inside the vcluster in `pull` mode.
+
+The test mounts a host-cluster kubeconfig into the controller pod so it can watch source Secrets on the host cluster while writing synced Secrets into namespaces inside the vcluster.
+
+## Manual vcluster test
+
+This example uses the flow:
+
+- source secret on the host cluster in the same namespace where the `vcluster` is installed
+- synced target secret inside the `vcluster`
+
+Example variables:
+
+```bash
+export INTEGRATION_CLUSTER=secret-sync-it
+export VCLUSTER_NAME=secret-sync-vcluster
+export VCLUSTER_NAMESPACE=secret-sync-vcluster
+export VCLUSTER_CONNECT_PORT=18443
+export VCLUSTER_KUBECONFIG=.tmp/integration/vcluster.kubeconfig
+export SOURCE_NAMESPACE=secret-sync-vcluster
+export TARGET_NAMESPACE=shared-runtime
+```
+
+Create a local cluster and install `vcluster` only with Helm:
+
+```bash
+k3d cluster create "$INTEGRATION_CLUSTER"
+kubectl config use-context "k3d-$INTEGRATION_CLUSTER"
+
+helm upgrade --install "$VCLUSTER_NAME" vcluster \
+  --repo https://charts.loft.sh \
+  --namespace "$VCLUSTER_NAMESPACE" \
+  --create-namespace \
+  --wait \
+  --timeout 5m
+```
+
+Access the vcluster without the `vcluster` CLI:
+
+```bash
+mkdir -p .tmp/integration
+
+kubectl -n "$VCLUSTER_NAMESPACE" port-forward service/"$VCLUSTER_NAME" "$VCLUSTER_CONNECT_PORT":443
+```
+
+In another shell:
+
+```bash
+kubectl -n "$VCLUSTER_NAMESPACE" get secret "vc-$VCLUSTER_NAME" -o jsonpath='{.data.config}' | base64 -d > .tmp/integration/vcluster.raw.kubeconfig
+sed -E "s#server: https://[^[:space:]]+#server: https://localhost:$VCLUSTER_CONNECT_PORT#" \
+  .tmp/integration/vcluster.raw.kubeconfig > "$VCLUSTER_KUBECONFIG"
+
+KUBECONFIG="$VCLUSTER_KUBECONFIG" kubectl get namespaces
+KUBECONFIG="$VCLUSTER_KUBECONFIG" kubectl get pods -A
+```
+
+Deploy `secret-sync-controller` into the vcluster in pull mode:
+
+```bash
+docker build -t secret-sync-controller:it .
+k3d image import -c "$INTEGRATION_CLUSTER" secret-sync-controller:it
+
+kubectl -n "$SOURCE_NAMESPACE" create serviceaccount secret-sync-vcluster-host
+kubectl -n "$SOURCE_NAMESPACE" create role secret-sync-vcluster-host \
+  --verb=get,list,watch --resource=secrets
+kubectl -n "$SOURCE_NAMESPACE" create rolebinding secret-sync-vcluster-host \
+  --role=secret-sync-vcluster-host \
+  --serviceaccount="$SOURCE_NAMESPACE:secret-sync-vcluster-host"
+```
+
+Build a host kubeconfig for the controller and mount it into the chart release:
+
+```bash
+HOST_PULL_TOKEN=$(kubectl -n "$SOURCE_NAMESPACE" create token secret-sync-vcluster-host)
+HOST_CA_DATA=$(kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
+HOST_API_IP=$(kubectl get service kubernetes -n default -o jsonpath='{.spec.clusterIP}')
+
+cat > .tmp/integration/host-pull.kubeconfig <<EOF
+apiVersion: v1
+kind: Config
+clusters:
+- name: host
+  cluster:
+    certificate-authority-data: ${HOST_CA_DATA}
+    server: https://${HOST_API_IP}:443
+contexts:
+- name: secret-sync
+  context:
+    cluster: host
+    namespace: ${SOURCE_NAMESPACE}
+    user: secret-sync
+current-context: secret-sync
+users:
+- name: secret-sync
+  user:
+    token: ${HOST_PULL_TOKEN}
+EOF
+
+KUBECONFIG="$VCLUSTER_KUBECONFIG" kubectl create namespace secret-sync-vcluster-system
+KUBECONFIG="$VCLUSTER_KUBECONFIG" kubectl create namespace "$TARGET_NAMESPACE"
+KUBECONFIG="$VCLUSTER_KUBECONFIG" kubectl -n secret-sync-vcluster-system create secret generic secret-sync-host-access \
+  --from-file=config=.tmp/integration/host-pull.kubeconfig
+
+KUBECONFIG="$VCLUSTER_KUBECONFIG" helm upgrade --install secret-sync-controller ./charts/secret-sync-controller \
+  --namespace secret-sync-vcluster-system \
+  --create-namespace \
+  --set-string image.repository=secret-sync-controller \
+  --set-string image.tag=it \
+  --set-string controller.syncMode=pull \
+  --set-string controller.hostKubeconfig=/etc/secret-sync-host/config \
+  --set-string controller.sourceNamespace="$SOURCE_NAMESPACE" \
+  --set-string controller.targetNamespace="$TARGET_NAMESPACE" \
+  --set-string extraEnv[0].name=KUBERNETES_SERVICE_HOST \
+  --set-string extraEnv[0].value="$VCLUSTER_NAME.$VCLUSTER_NAMESPACE.svc" \
+  --set-string extraEnv[1].name=KUBERNETES_SERVICE_PORT \
+  --set-string extraEnv[1].value=443 \
+  --set-string extraVolumes[0].name=host-access \
+  --set-string extraVolumes[0].secret.secretName=secret-sync-host-access \
+  --set-string extraVolumeMounts[0].name=host-access \
+  --set-string extraVolumeMounts[0].mountPath=/etc/secret-sync-host \
+  --set extraVolumeMounts[0].readOnly=true
+```
+
+Manual smoke test:
+
+```bash
+kubectl -n "$SOURCE_NAMESPACE" create secret generic app-db-secret \
+  --from-literal=username=appuser \
+  --from-literal=password=supersecret
+
+kubectl -n "$SOURCE_NAMESPACE" label secret app-db-secret \
+  obegron.github.io/secret-sync-enabled=true
+
+kubectl -n "$SOURCE_NAMESPACE" annotate secret app-db-secret \
+  obegron.github.io/secret-sync-targets="[{\"kind\":\"cluster\",\"namespace\":\"$TARGET_NAMESPACE\"}]" \
+  obegron.github.io/delete-policy=delete
+
+kubectl -n "$SOURCE_NAMESPACE" get secret app-db-secret
+KUBECONFIG="$VCLUSTER_KUBECONFIG" kubectl -n "$TARGET_NAMESPACE" get secret app-db-secret -o yaml
+kubectl -n "$SOURCE_NAMESPACE" get events --field-selector involvedObject.name=app-db-secret
+```
+
+Useful checks:
+
+```bash
+# host cluster
+kubectl -n "$SOURCE_NAMESPACE" get secret app-db-secret -o yaml
+kubectl -n "$VCLUSTER_NAMESPACE" get pods
+kubectl -n "$VCLUSTER_NAMESPACE" logs pod/$(kubectl -n "$VCLUSTER_NAMESPACE" get pods -o name | grep secret-sync-controller | head -n1)
+
+# vcluster
+KUBECONFIG="$VCLUSTER_KUBECONFIG" kubectl -n secret-sync-vcluster-system get pods
+KUBECONFIG="$VCLUSTER_KUBECONFIG" kubectl -n "$TARGET_NAMESPACE" get secrets
 ```
 
 ## License

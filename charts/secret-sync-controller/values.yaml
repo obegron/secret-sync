@@ -20,6 +20,7 @@ rbac:
 
 controller:
   syncMode: push
+  hostKubeconfig: ""
   sourceNamespace: ""
   targetNamespace: ""
   hostAPIServer: ""
@@ -44,6 +45,9 @@ probes:
     failureThreshold: 3
 
 resources: {}
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []
 nodeSelector: {}
 tolerations: []
 affinity: {}

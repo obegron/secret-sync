@@ -25,6 +25,8 @@ spec:
                   fieldPath: metadata.namespace
             - name: SYNC_MODE
               value: push
+            - name: HOST_KUBECONFIG
+              value: ""
             - name: SOURCE_NAMESPACE
               value: ""
             - name: TARGET_NAMESPACE

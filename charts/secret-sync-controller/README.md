@@ -18,10 +18,15 @@ image:
 
 controller:
   syncMode: push
+  hostKubeconfig: ""
   sourceNamespace: tenant-host-ns
   defaultDeletePolicy: delete
   pullNamespaceIsolation: false
   allowedSyncTargets: '[{"kind":"cluster","namespace":"shared-runtime"}]'
+
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []
 ```
 
 Render:
