@@ -10,6 +10,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY cmd ./cmd
+COPY internal ./internal
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64

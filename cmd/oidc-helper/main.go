@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"secret-sync-controller/internal/auth"
 )
 
 var Version = "dev"
@@ -126,19 +126,6 @@ func (a *app) init() error {
 		return nil
 	}
 
-	tokenBytes, err := os.ReadFile(a.cfg.TokenPath)
-	if err != nil {
-		return fmt.Errorf("read token: %w", err)
-	}
-	caBytes, err := os.ReadFile(a.cfg.CAPath)
-	if err != nil {
-		return fmt.Errorf("read ca: %w", err)
-	}
-	caPool := x509.NewCertPool()
-	if !caPool.AppendCertsFromPEM(caBytes) {
-		return errors.New("append CA cert failed")
-	}
-
 	if a.cfg.KubernetesAPIServer == "" {
 		host := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST"))
 		port := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_PORT"))
@@ -148,15 +135,11 @@ func (a *app) init() error {
 		a.cfg.KubernetesAPIServer = "https://" + host + ":" + port
 	}
 
-	a.k8sClient = &http.Client{
-		Transport: &bearerAuthTransport{
-			token: strings.TrimSpace(string(tokenBytes)),
-			transport: &http.Transport{
-				TLSClientConfig: &tls.Config{RootCAs: caPool},
-			},
-		},
-		Timeout: 10 * time.Second,
+	client, err := auth.NewBearerTokenFileClient(a.cfg.TokenPath, a.cfg.CAPath, 10*time.Second)
+	if err != nil {
+		return err
 	}
+	a.k8sClient = client
 
 	return nil
 }
@@ -260,16 +243,6 @@ func envOrDefault(name, fallback string) string {
 		return v
 	}
 	return fallback
-}
-
-type bearerAuthTransport struct {
-	token     string
-	transport http.RoundTripper
-}
-
-func (t *bearerAuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	req.Header.Set("Authorization", "Bearer "+t.token)
-	return t.transport.RoundTrip(req)
 }
 
 type responseWriter struct {

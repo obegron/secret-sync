@@ -24,6 +24,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
+	"secret-sync-controller/internal/auth"
 )
 
 var Version = "dev"
@@ -87,7 +88,7 @@ type controller struct {
 	startedAt        time.Time
 	ready            atomic.Bool
 	metrics          metricsState
-	bridgeVerifier   *bridgeVerifier
+	bridgeVerifier   *auth.Verifier
 	bridgeHTTPClient *http.Client
 }
 
@@ -151,7 +152,7 @@ func main() {
 		startedAt:        time.Now(),
 	}
 	if cfg.syncMode == modeSource && len(cfg.bridgeTrustIssuers) > 0 {
-		c.bridgeVerifier, err = newBridgeVerifier(cfg.bridgeTrustIssuers, cfg.bridgeAllowedSubjects)
+		c.bridgeVerifier, err = auth.NewVerifier(cfg.bridgeTrustIssuers, cfg.bridgeAllowedSubjects)
 		if err != nil {
 			log.Fatalf("build bridge verifier: %v", err)
 		}
