@@ -58,6 +58,7 @@ service:
   enabled: true
   type: ClusterIP
   port: 8080
+  publishNotReadyAddresses: true
 extraEnv: []
 extraVolumes: []
 extraVolumeMounts: []

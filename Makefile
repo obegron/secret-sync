@@ -343,7 +343,7 @@ integration-test-vcluster: check-tools ## Run pull-mode integration test from a 
 	done; \
 	[ "$$INNER_PHASE" = "Running" ]; \
 	for i in $$(seq 1 30); do \
-		INNER_SERVICE_IP=$$(kubectl -n "$(VCLUSTER_NAMESPACE)" get service -l app="$(VCLUSTER_CONTROLLER_RELEASE)",vcluster.loft.sh/namespace="$(VCLUSTER_CONTROLLER_NAMESPACE)" -o jsonpath='{.items[0].spec.clusterIP}' 2>/dev/null || true); \
+		INNER_SERVICE_IP=$$(kubectl -n "$(VCLUSTER_NAMESPACE)" get service -l vcluster.loft.sh/namespace="$(VCLUSTER_CONTROLLER_NAMESPACE)" -o jsonpath='{.items[0].spec.clusterIP}' 2>/dev/null || true); \
 		if [ -n "$$INNER_SERVICE_IP" ]; then \
 			break; \
 		fi; \
