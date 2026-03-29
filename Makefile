@@ -27,6 +27,8 @@ VCLUSTER_NAME ?= secret-sync-vcluster
 VCLUSTER_NAMESPACE ?= secret-sync-vcluster
 VCLUSTER_CONNECT_PORT ?= 18443
 VCLUSTER_ASSERT_PORT ?= 18444
+VCLUSTER_BRIDGE_PORT ?= 18082
+VCLUSTER_OIDC_PORT ?= 18083
 VCLUSTER_KUBECONFIG ?= $(INTEGRATION_TMP_DIR)/vcluster.kubeconfig
 VCLUSTER_CONTROLLER_NAMESPACE ?= secret-sync-vcluster-system
 VCLUSTER_CONTROLLER_RELEASE ?= secret-sync-controller
@@ -313,10 +315,24 @@ integration-test-vcluster: check-tools ## Run pull-mode integration test from a 
 	KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl create namespace "$(CLUSTER_TARGET_NAMESPACE)" --dry-run=client -o yaml | KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl apply -f -; \
 	KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl create namespace "$(CLUSTER_TARGET_NAMESPACE_2)" --dry-run=client -o yaml | KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl apply -f -; \
 	VCLUSTER_API_IP=$$(kubectl -n "$(VCLUSTER_NAMESPACE)" get endpoints "$(VCLUSTER_NAME)" -o jsonpath='{.subsets[0].addresses[0].ip}'); \
+	HOST_GATEWAY_IP=$$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' k3d-$(INTEGRATION_CLUSTER)-server-0); \
 	INTEGRATION_IMAGE_OVERRIDE="$(INTEGRATION_IMAGE)"; \
 	INTEGRATION_IMAGE_REPOSITORY=$${INTEGRATION_IMAGE_OVERRIDE%:*}; \
 	INTEGRATION_IMAGE_TAG=$${INTEGRATION_IMAGE_OVERRIDE##*:}; \
 	HELM_CACHE_HOME="$(INTEGRATION_HELM_DIR)/cache" HELM_CONFIG_HOME="$(INTEGRATION_HELM_DIR)/config" HELM_DATA_HOME="$(INTEGRATION_HELM_DIR)/data" \
+	helm upgrade --install "$$HOST_SOURCE_RELEASE" ./charts/secret-sync-controller \
+		--namespace "$$HOST_SOURCE_NAMESPACE" \
+		--create-namespace \
+		--set-string fullnameOverride="$$HOST_SOURCE_RELEASE" \
+		--set-string image.repository="$$INTEGRATION_IMAGE_REPOSITORY" \
+		--set-string image.tag="$$INTEGRATION_IMAGE_TAG" \
+		--set-string controller.syncMode=source \
+		--set-string controller.sourceNamespace="$$HOST_SOURCE_NAMESPACE" \
+		--set-string controller.bridgeAllowedSubjects="$$INNER_SUBJECT"; \
+	kubectl -n "$$HOST_SOURCE_NAMESPACE" rollout status deployment/"$$HOST_SOURCE_RELEASE" --timeout=180s; \
+	kubectl -n "$$HOST_SOURCE_NAMESPACE" port-forward --address 0.0.0.0 service/"$$HOST_SOURCE_RELEASE" "$(VCLUSTER_BRIDGE_PORT)":8080 > "$(INTEGRATION_TMP_DIR)/port-forward-source.log" 2>&1 & \
+	SOURCE_PF_PID=$$!; \
+	trap 'kill $$SOURCE_PF_PID >/dev/null 2>&1 || true; kill $$VCLUSTER_PF_PID >/dev/null 2>&1 || true' EXIT; \
 	HELM_CACHE_HOME="$(INTEGRATION_HELM_DIR)/cache" HELM_CONFIG_HOME="$(INTEGRATION_HELM_DIR)/config" HELM_DATA_HOME="$(INTEGRATION_HELM_DIR)/data" \
 	KUBECONFIG="$(VCLUSTER_KUBECONFIG)" \
 	helm upgrade --install "$(VCLUSTER_CONTROLLER_RELEASE)" ./charts/secret-sync-controller \
@@ -328,8 +344,9 @@ integration-test-vcluster: check-tools ## Run pull-mode integration test from a 
 		--set-string controller.sourceProvider=bridge \
 		--set-string controller.sourceNamespace="$$HOST_SOURCE_NAMESPACE" \
 		--set-string controller.targetNamespace="$(CLUSTER_TARGET_NAMESPACE)" \
-		--set-string controller.bridgeBaseURL=http://127.0.0.1:65535 \
+		--set-string controller.bridgeBaseURL="http://$$HOST_GATEWAY_IP:$(VCLUSTER_BRIDGE_PORT)" \
 		--set-string controller.oidcProxyEnabled=true \
+		--set-string controller.oidcProxyBaseURL="http://$$HOST_GATEWAY_IP:$(VCLUSTER_OIDC_PORT)" \
 		--set-string extraEnv[0].name=KUBERNETES_SERVICE_HOST \
 		--set-string extraEnv[0].value="$$VCLUSTER_API_IP" \
 		--set-string extraEnv[1].name=KUBERNETES_SERVICE_PORT \
@@ -342,15 +359,15 @@ integration-test-vcluster: check-tools ## Run pull-mode integration test from a 
 		sleep 2; \
 	done; \
 	[ "$$INNER_PHASE" = "Running" ]; \
+	KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl -n "$(VCLUSTER_CONTROLLER_NAMESPACE)" port-forward --address 0.0.0.0 service/"$(VCLUSTER_CONTROLLER_RELEASE)" "$(VCLUSTER_OIDC_PORT)":8080 > "$(INTEGRATION_TMP_DIR)/port-forward-inner-oidc.log" 2>&1 & \
+	INNER_PF_PID=$$!; \
+	trap 'kill $$INNER_PF_PID >/dev/null 2>&1 || true; kill $$SOURCE_PF_PID >/dev/null 2>&1 || true; kill $$VCLUSTER_PF_PID >/dev/null 2>&1 || true' EXIT; \
 	for i in $$(seq 1 30); do \
-		INNER_SERVICE_IP=$$(kubectl -n "$(VCLUSTER_NAMESPACE)" get service -l vcluster.loft.sh/namespace="$(VCLUSTER_CONTROLLER_NAMESPACE)" -o jsonpath='{.items[0].spec.clusterIP}' 2>/dev/null || true); \
-		if [ -n "$$INNER_SERVICE_IP" ]; then \
+		if curl -fsS "http://127.0.0.1:$(VCLUSTER_OIDC_PORT)/.well-known/openid-configuration" > "$(INTEGRATION_TMP_DIR)/vcluster-oidc.json" 2>/dev/null; then \
 			break; \
 		fi; \
 		sleep 2; \
 	done; \
-	[ -n "$$INNER_SERVICE_IP" ]; \
-	KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl get --raw /.well-known/openid-configuration > "$(INTEGRATION_TMP_DIR)/vcluster-oidc.json"; \
 	INNER_ISSUER=$$(sed -n 's/.*"issuer":"\([^"]*\)".*/\1/p' "$(INTEGRATION_TMP_DIR)/vcluster-oidc.json"); \
 	[ -n "$$INNER_ISSUER" ]; \
 	HELM_CACHE_HOME="$(INTEGRATION_HELM_DIR)/cache" HELM_CONFIG_HOME="$(INTEGRATION_HELM_DIR)/config" HELM_DATA_HOME="$(INTEGRATION_HELM_DIR)/data" \
@@ -362,41 +379,22 @@ integration-test-vcluster: check-tools ## Run pull-mode integration test from a 
 		--set-string image.tag="$$INTEGRATION_IMAGE_TAG" \
 		--set-string controller.syncMode=source \
 		--set-string controller.sourceNamespace="$$HOST_SOURCE_NAMESPACE" \
-		--set-string controller.bridgeTrustIssuers="$$INNER_ISSUER=http://$$INNER_SERVICE_IP:8080" \
+		--set-string controller.bridgeTrustIssuers="$$INNER_ISSUER=http://$$HOST_GATEWAY_IP:$(VCLUSTER_OIDC_PORT)" \
 		--set-string controller.bridgeAllowedSubjects="$$INNER_SUBJECT"; \
 	kubectl -n "$$HOST_SOURCE_NAMESPACE" rollout status deployment/"$$HOST_SOURCE_RELEASE" --timeout=180s; \
-	OUTER_POD_IP=$$(kubectl -n "$$HOST_SOURCE_NAMESPACE" get pods -l app="$$HOST_SOURCE_RELEASE" -o jsonpath='{.items[0].status.podIP}'); \
-	[ -n "$$OUTER_POD_IP" ]; \
-	HELM_CACHE_HOME="$(INTEGRATION_HELM_DIR)/cache" HELM_CONFIG_HOME="$(INTEGRATION_HELM_DIR)/config" HELM_DATA_HOME="$(INTEGRATION_HELM_DIR)/data" \
-	KUBECONFIG="$(VCLUSTER_KUBECONFIG)" \
-	helm upgrade --install "$(VCLUSTER_CONTROLLER_RELEASE)" ./charts/secret-sync-controller \
-		--namespace "$(VCLUSTER_CONTROLLER_NAMESPACE)" \
-		--create-namespace \
-		--set-string image.repository="$$INTEGRATION_IMAGE_REPOSITORY" \
-		--set-string image.tag="$$INTEGRATION_IMAGE_TAG" \
-		--set-string controller.syncMode=pull \
-		--set-string controller.sourceProvider=bridge \
-		--set-string controller.sourceNamespace="$$HOST_SOURCE_NAMESPACE" \
-		--set-string controller.targetNamespace="$(CLUSTER_TARGET_NAMESPACE)" \
-		--set-string controller.bridgeBaseURL="http://$$OUTER_POD_IP:8080" \
-		--set-string controller.oidcProxyEnabled=true \
-		--set-string extraEnv[0].name=KUBERNETES_SERVICE_HOST \
-		--set-string extraEnv[0].value="$$VCLUSTER_API_IP" \
-		--set-string extraEnv[1].name=KUBERNETES_SERVICE_PORT \
-		--set-string extraEnv[1].value=8443; \
+	kill $$SOURCE_PF_PID >/dev/null 2>&1 || true; \
+	kubectl -n "$$HOST_SOURCE_NAMESPACE" port-forward --address 0.0.0.0 service/"$$HOST_SOURCE_RELEASE" "$(VCLUSTER_BRIDGE_PORT)":8080 > "$(INTEGRATION_TMP_DIR)/port-forward-source.log" 2>&1 & \
+	SOURCE_PF_PID=$$!; \
 	KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl -n "$(VCLUSTER_CONTROLLER_NAMESPACE)" rollout status deployment/"$(VCLUSTER_CONTROLLER_RELEASE)" --timeout=180s; \
-	KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl -n "$(VCLUSTER_CONTROLLER_NAMESPACE)" port-forward deployment/"$(VCLUSTER_CONTROLLER_RELEASE)" 18081:8080 > "$(INTEGRATION_TMP_DIR)/port-forward-vcluster-controller.log" 2>&1 & \
-	CONTROLLER_PF_PID=$$!; \
-	trap 'kill $$CONTROLLER_PF_PID >/dev/null 2>&1 || true; kill $$VCLUSTER_PF_PID >/dev/null 2>&1 || true' EXIT; \
 	for i in $$(seq 1 30); do \
-		if curl -fsS http://127.0.0.1:18081/readyz >/dev/null 2>&1; then \
+		if curl -fsS "http://127.0.0.1:$(VCLUSTER_OIDC_PORT)/readyz" >/dev/null 2>&1; then \
 			break; \
 		fi; \
 		sleep 2; \
 	done; \
-	curl -fsS http://127.0.0.1:18081/healthz >/dev/null; \
-	curl -fsS http://127.0.0.1:18081/readyz >/dev/null; \
-	curl -fsS http://127.0.0.1:18081/metrics | grep -q 'secret_sync_reconcile_total'; \
+	curl -fsS "http://127.0.0.1:$(VCLUSTER_OIDC_PORT)/healthz" >/dev/null; \
+	curl -fsS "http://127.0.0.1:$(VCLUSTER_OIDC_PORT)/readyz" >/dev/null; \
+	curl -fsS "http://127.0.0.1:$(VCLUSTER_OIDC_PORT)/metrics" | grep -q 'secret_sync_reconcile_total'; \
 	PULL_SECRET_NAME="$(SOURCE_SECRET_NAME)-vcluster"; \
 	kubectl -n "$$HOST_SOURCE_NAMESPACE" delete secret "$$PULL_SECRET_NAME" --ignore-not-found; \
 	kubectl -n "$$HOST_SOURCE_NAMESPACE" create secret generic "$$PULL_SECRET_NAME" \
@@ -410,7 +408,7 @@ integration-test-vcluster: check-tools ## Run pull-mode integration test from a 
 		obegron.github.io/delete-policy=delete --overwrite; \
 	kubectl -n "$(VCLUSTER_NAMESPACE)" port-forward service/"$(VCLUSTER_NAME)" "$(VCLUSTER_ASSERT_PORT)":443 > "$(INTEGRATION_TMP_DIR)/port-forward-vcluster-assert.log" 2>&1 & \
 	ASSERT_PF_PID=$$!; \
-	trap 'kill $$ASSERT_PF_PID >/dev/null 2>&1 || true; kill $$CONTROLLER_PF_PID >/dev/null 2>&1 || true; kill $$VCLUSTER_PF_PID >/dev/null 2>&1 || true' EXIT; \
+	trap 'kill $$ASSERT_PF_PID >/dev/null 2>&1 || true; kill $$INNER_PF_PID >/dev/null 2>&1 || true; kill $$SOURCE_PF_PID >/dev/null 2>&1 || true; kill $$VCLUSTER_PF_PID >/dev/null 2>&1 || true' EXIT; \
 	sed -E 's#server: https://[^[:space:]]+#server: https://localhost:$(VCLUSTER_ASSERT_PORT)#' "$(INTEGRATION_TMP_DIR)/vcluster.raw.kubeconfig" > "$(INTEGRATION_TMP_DIR)/vcluster.assert.kubeconfig"; \
 	for i in $$(seq 1 30); do \
 		if KUBECONFIG="$(INTEGRATION_TMP_DIR)/vcluster.assert.kubeconfig" kubectl get namespace "$(CLUSTER_TARGET_NAMESPACE)" >/dev/null 2>&1; then \
@@ -461,7 +459,8 @@ integration-test-vcluster: check-tools ## Run pull-mode integration test from a 
 	! KUBECONFIG="$(INTEGRATION_TMP_DIR)/vcluster.assert.kubeconfig" kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PULL_SECRET_NAME" >/dev/null 2>&1; \
 	echo "integration vcluster test passed"; \
 	kill $$ASSERT_PF_PID >/dev/null 2>&1 || true; \
-	kill $$CONTROLLER_PF_PID >/dev/null 2>&1 || true; \
+	kill $$INNER_PF_PID >/dev/null 2>&1 || true; \
+	kill $$SOURCE_PF_PID >/dev/null 2>&1 || true; \
 	kill $$VCLUSTER_PF_PID >/dev/null 2>&1 || true; \
 	trap - EXIT
 

@@ -143,13 +143,16 @@ make run-oidc-helper
 
 ## Helm-only vcluster integration
 
-`make integration-test-vcluster` creates a `vcluster` via the official Helm chart, extracts the generated kubeconfig from the `vc-<release>` Secret, port-forwards the vcluster API locally, and deploys `secret-sync-controller` inside the vcluster in `pull` mode.
+`make integration-test-vcluster` creates a `vcluster` via the official Helm chart, extracts the generated kubeconfig from the `vc-<release>` Secret, port-forwards the vcluster API locally, and deploys two `secret-sync-controller` instances:
 
-The test mounts a host-cluster kubeconfig into the controller pod so it can watch source Secrets on the host cluster while writing synced Secrets into namespaces inside the vcluster.
+- outer `source` instance on the host cluster in `secret-sync-vcluster`
+- inner `pull` instance inside the `vcluster` in `secret-sync-vcluster-system`
 
-The automated target uses this default source flow:
+The inner instance talks to the outer one over the bridge HTTP API and authenticates with OIDC/JWT. For the integration test, those OIDC and bridge endpoints are exposed through host port-forwards with explicit public URLs.
 
-- source secret on the host cluster in `tenant-host-ns`
+The automated target uses this flow:
+
+- source secret on the host cluster in `secret-sync-vcluster`
 - target secret inside the `vcluster` in `shared-runtime` and `shared-runtime-2`
 
 ## Manual vcluster test
@@ -164,13 +167,11 @@ That target creates:
 
 - the k3d cluster
 - the Helm-installed `vcluster`
-- the `secret-sync-controller` release inside the `vcluster`
+- the outer `secret-sync-source` release on the host cluster
+- the inner `secret-sync-controller` release inside the `vcluster`
 - `.tmp/integration/vcluster.kubeconfig`
 
-After that, you can manually test a different source flow, for example:
-
-- source secret on the host cluster in `secret-sync-vcluster`
-- target secret inside the `vcluster` in `shared-runtime`
+After that, you can manually test the same bridge flow the automated target uses:
 
 If you want to reconnect to the `vcluster` manually later, re-export the defaults:
 
@@ -178,6 +179,8 @@ If you want to reconnect to the `vcluster` manually later, re-export the default
 export VCLUSTER_NAME=secret-sync-vcluster
 export VCLUSTER_NAMESPACE=secret-sync-vcluster
 export VCLUSTER_CONNECT_PORT=18443
+export VCLUSTER_BRIDGE_PORT=18082
+export VCLUSTER_OIDC_PORT=18083
 export VCLUSTER_KUBECONFIG=.tmp/integration/vcluster.kubeconfig
 export SOURCE_NAMESPACE=secret-sync-vcluster
 export TARGET_NAMESPACE=shared-runtime
@@ -200,30 +203,27 @@ KUBECONFIG="$VCLUSTER_KUBECONFIG" kubectl get namespaces
 KUBECONFIG="$VCLUSTER_KUBECONFIG" kubectl -n secret-sync-vcluster-system get pods
 ```
 
-If you want the controller to watch the same host namespace where the `vcluster` itself runs, redeploy it with:
+Re-open the forwarded bridge and OIDC endpoints the automated test uses:
 
 ```bash
-KUBECONFIG="$VCLUSTER_KUBECONFIG" helm upgrade --install secret-sync-controller ./charts/secret-sync-controller \
-  --namespace secret-sync-vcluster-system \
-  --create-namespace \
-  --set-string image.repository=secret-sync-controller \
-  --set-string image.tag=it \
-  --set-string controller.syncMode=pull \
-  --set-string controller.hostKubeconfig=/etc/secret-sync-host/config \
-  --set-string controller.sourceNamespace=secret-sync-vcluster \
-  --set-string controller.targetNamespace=shared-runtime \
-  --set-string extraEnv[0].name=KUBERNETES_SERVICE_HOST \
-  --set-string extraEnv[0].value="$(kubectl -n secret-sync-vcluster get endpoints secret-sync-vcluster -o jsonpath='{.subsets[0].addresses[0].ip}')" \
-  --set-string extraEnv[1].name=KUBERNETES_SERVICE_PORT \
-  --set-string extraEnv[1].value=8443 \
-  --set-string extraVolumes[0].name=host-access \
-  --set-string extraVolumes[0].secret.secretName=secret-sync-host-access \
-  --set-string extraVolumeMounts[0].name=host-access \
-  --set-string extraVolumeMounts[0].mountPath=/etc/secret-sync-host \
-  --set extraVolumeMounts[0].readOnly=true
+kubectl -n "$SOURCE_NAMESPACE" port-forward --address 0.0.0.0 service/secret-sync-source "$VCLUSTER_BRIDGE_PORT":8080
 ```
 
-Manual smoke test for `secret-sync-vcluster` host namespace -> `vcluster` sync:
+In another shell:
+
+```bash
+KUBECONFIG="$VCLUSTER_KUBECONFIG" kubectl -n secret-sync-vcluster-system port-forward --address 0.0.0.0 service/secret-sync-controller "$VCLUSTER_OIDC_PORT":8080
+```
+
+The public URLs the controllers use in the test are:
+
+```bash
+HOST_GATEWAY_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' k3d-secret-sync-it-server-0)
+echo "bridge: http://$HOST_GATEWAY_IP:$VCLUSTER_BRIDGE_PORT"
+echo "oidc:   http://$HOST_GATEWAY_IP:$VCLUSTER_OIDC_PORT"
+```
+
+Manual smoke test for host namespace -> `vcluster` sync:
 
 ```bash
 kubectl -n "$SOURCE_NAMESPACE" create secret generic app-db-secret \
@@ -245,6 +245,8 @@ kubectl -n "$SOURCE_NAMESPACE" get events --field-selector involvedObject.name=a
 Useful checks:
 
 ```bash
+kubectl -n "$SOURCE_NAMESPACE" get pods
+kubectl -n "$SOURCE_NAMESPACE" logs deploy/secret-sync-source
 kubectl -n "$VCLUSTER_NAMESPACE" get pods
 kubectl -n "$VCLUSTER_NAMESPACE" logs pod/$(kubectl -n "$VCLUSTER_NAMESPACE" get pods -o name | grep secret-sync-controller | head -n1)
 KUBECONFIG="$VCLUSTER_KUBECONFIG" kubectl -n "$TARGET_NAMESPACE" get secrets

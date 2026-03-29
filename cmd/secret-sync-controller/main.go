@@ -219,9 +219,6 @@ func main() {
 	if cfg.syncMode == modePull && cfg.sourceProvider == sourceProviderBridge && cfg.bridgeBaseURL == "" {
 		log.Fatal("SOURCE_PROVIDER=bridge requires BRIDGE_BASE_URL")
 	}
-	if cfg.syncMode == modeSource && len(cfg.bridgeTrustIssuers) == 0 {
-		log.Fatal("SYNC_MODE=source requires BRIDGE_TRUST_ISSUERS")
-	}
 	if cfg.syncMode == modePull && cfg.sourceNamespace == cfg.targetNamespace {
 		// If HOST_API_SERVER is empty and HOST_KUBECONFIG is empty, it's definitely the same cluster.
 		if cfg.hostAPIServer == "" && cfg.hostKubeconfig == "" {
@@ -265,7 +262,7 @@ func main() {
 		cfg:              cfg,
 		allowedTargetIDs: allowedTargetIDs,
 	}
-	if cfg.syncMode == modeSource {
+	if cfg.syncMode == modeSource && len(cfg.bridgeTrustIssuers) > 0 {
 		c.bridgeVerifier, err = newBridgeVerifier(cfg.bridgeTrustIssuers, cfg.bridgeAllowedSubjects)
 		if err != nil {
 			log.Fatalf("build bridge verifier: %v", err)

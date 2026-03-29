@@ -149,7 +149,7 @@ func (c *controller) handleBridgeList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if c.bridgeVerifier == nil {
-		http.Error(w, "bridge verifier is not configured\n", http.StatusInternalServerError)
+		http.Error(w, "bridge verifier is not configured\n", http.StatusServiceUnavailable)
 		return
 	}
 	if _, err := c.bridgeVerifier.authenticate(r); err != nil {
