@@ -222,10 +222,6 @@ func main() {
 	if cfg.syncMode == modeSource && len(cfg.bridgeTrustIssuers) == 0 {
 		log.Fatal("SYNC_MODE=source requires BRIDGE_TRUST_ISSUERS")
 	}
-	if cfg.oidcProxyEnabled && cfg.oidcProxyBaseURL == "" {
-		log.Fatal("OIDC_PROXY_ENABLED=true requires OIDC_PROXY_BASE_URL")
-	}
-
 	if cfg.syncMode == modePull && cfg.sourceNamespace == cfg.targetNamespace {
 		// If HOST_API_SERVER is empty and HOST_KUBECONFIG is empty, it's definitely the same cluster.
 		if cfg.hostAPIServer == "" && cfg.hostKubeconfig == "" {

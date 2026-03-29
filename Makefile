@@ -317,6 +317,7 @@ integration-test-vcluster: check-tools ## Run pull-mode integration test from a 
 	INTEGRATION_IMAGE_REPOSITORY=$${INTEGRATION_IMAGE_OVERRIDE%:*}; \
 	INTEGRATION_IMAGE_TAG=$${INTEGRATION_IMAGE_OVERRIDE##*:}; \
 	HELM_CACHE_HOME="$(INTEGRATION_HELM_DIR)/cache" HELM_CONFIG_HOME="$(INTEGRATION_HELM_DIR)/config" HELM_DATA_HOME="$(INTEGRATION_HELM_DIR)/data" \
+	HELM_CACHE_HOME="$(INTEGRATION_HELM_DIR)/cache" HELM_CONFIG_HOME="$(INTEGRATION_HELM_DIR)/config" HELM_DATA_HOME="$(INTEGRATION_HELM_DIR)/data" \
 	KUBECONFIG="$(VCLUSTER_KUBECONFIG)" \
 	helm upgrade --install "$(VCLUSTER_CONTROLLER_RELEASE)" ./charts/secret-sync-controller \
 		--namespace "$(VCLUSTER_CONTROLLER_NAMESPACE)" \
@@ -329,7 +330,6 @@ integration-test-vcluster: check-tools ## Run pull-mode integration test from a 
 		--set-string controller.targetNamespace="$(CLUSTER_TARGET_NAMESPACE)" \
 		--set-string controller.bridgeBaseURL=http://127.0.0.1:65535 \
 		--set-string controller.oidcProxyEnabled=true \
-		--set-string controller.oidcProxyBaseURL=http://127.0.0.1:65535 \
 		--set-string extraEnv[0].name=KUBERNETES_SERVICE_HOST \
 		--set-string extraEnv[0].value="$$VCLUSTER_API_IP" \
 		--set-string extraEnv[1].name=KUBERNETES_SERVICE_PORT \
@@ -380,7 +380,6 @@ integration-test-vcluster: check-tools ## Run pull-mode integration test from a 
 		--set-string controller.targetNamespace="$(CLUSTER_TARGET_NAMESPACE)" \
 		--set-string controller.bridgeBaseURL="http://$$OUTER_POD_IP:8080" \
 		--set-string controller.oidcProxyEnabled=true \
-		--set-string controller.oidcProxyBaseURL="http://$$INNER_SERVICE_IP:8080" \
 		--set-string extraEnv[0].name=KUBERNETES_SERVICE_HOST \
 		--set-string extraEnv[0].value="$$VCLUSTER_API_IP" \
 		--set-string extraEnv[1].name=KUBERNETES_SERVICE_PORT \

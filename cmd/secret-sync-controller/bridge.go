@@ -471,7 +471,7 @@ func (c *controller) handleOIDCConfigProxy(w http.ResponseWriter, r *http.Reques
 		http.Error(w, err.Error()+"\n", http.StatusInternalServerError)
 		return
 	}
-	payload["jwks_uri"] = strings.TrimSuffix(c.cfg.oidcProxyBaseURL, "/") + "/openid/v1/jwks"
+	payload["jwks_uri"] = strings.TrimSuffix(c.oidcProxyBaseURL(r), "/") + "/openid/v1/jwks"
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(payload)
@@ -489,6 +489,17 @@ func (c *controller) handleJWKSProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(body)
+}
+
+func (c *controller) oidcProxyBaseURL(r *http.Request) string {
+	if strings.TrimSpace(c.cfg.oidcProxyBaseURL) != "" {
+		return c.cfg.oidcProxyBaseURL
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host
 }
 
 func (c *controller) fetchLocalOIDCPath(ctx context.Context, path string) ([]byte, error) {
