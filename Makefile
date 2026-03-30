@@ -282,6 +282,8 @@ integration-test-pull: integration-up ## Run pull-mode integration test with sta
 integration-test-vcluster: check-tools ## Run push-mode integration test into a Helm-installed vcluster using the vc-* kubeconfig secret
 	@set -euo pipefail; \
 	HOST_PUSH_NAMESPACE="$(VCLUSTER_NAMESPACE)"; \
+	HOST_SOURCE_RELEASE="secret-sync-source"; \
+	HOST_SOURCE_SUBJECT="system:serviceaccount:$(VCLUSTER_NAMESPACE):secret-sync-source"; \
 	HOST_PUSH_RELEASE="secret-sync-controller"; \
 	HOST_PUSH_ACCESS_SECRET="secret-sync-vcluster-access"; \
 	HOST_KUBECONFIG_PATH="$(INTEGRATION_TMP_DIR)/host.kubeconfig"; \
@@ -316,11 +318,40 @@ integration-test-vcluster: check-tools ## Run push-mode integration test into a 
 	done; \
 	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$(VCLUSTER_NAMESPACE)" get secret "vc-$(VCLUSTER_NAME)" >/dev/null; \
 	VCLUSTER_API_IP=$$(KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$(VCLUSTER_NAMESPACE)" get endpoints "$(VCLUSTER_NAME)" -o jsonpath='{.subsets[0].addresses[0].ip}'); \
+	HOST_ISSUER=$$(KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl get --raw /.well-known/openid-configuration | sed -n 's/.*"issuer":"\([^"]*\)".*/\1/p'); \
+	[ -n "$$HOST_ISSUER" ]; \
+	INTEGRATION_IMAGE_OVERRIDE="$(INTEGRATION_IMAGE)"; \
+	INTEGRATION_IMAGE_REPOSITORY=$${INTEGRATION_IMAGE_OVERRIDE%:*}; \
+	INTEGRATION_IMAGE_TAG=$${INTEGRATION_IMAGE_OVERRIDE##*:}; \
+	HELM_CACHE_HOME="$(INTEGRATION_HELM_DIR)/cache" HELM_CONFIG_HOME="$(INTEGRATION_HELM_DIR)/config" HELM_DATA_HOME="$(INTEGRATION_HELM_DIR)/data" \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" helm upgrade --install "$$HOST_SOURCE_RELEASE" ./charts/secret-sync-controller \
+		--namespace "$$HOST_PUSH_NAMESPACE" \
+		--create-namespace \
+		--set-string fullnameOverride="$$HOST_SOURCE_RELEASE" \
+		--set-string image.repository="$$INTEGRATION_IMAGE_REPOSITORY" \
+		--set-string image.tag="$$INTEGRATION_IMAGE_TAG" \
+		--set-string controller.syncMode=source \
+		--set-string controller.sourceNamespace="$$HOST_PUSH_NAMESPACE" \
+		--set-string controller.kubeconfigSecretName="vc-$(VCLUSTER_NAME)" \
+		--set-string controller.oidcProxyEnabled=true \
+		--set-string controller.bridgeTrustIssuers="$$HOST_ISSUER=http://$$HOST_SOURCE_RELEASE.$$HOST_PUSH_NAMESPACE.svc:8080" \
+		--set-string controller.bridgeAllowedSubjects="$$HOST_SOURCE_SUBJECT"; \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$$HOST_PUSH_NAMESPACE" rollout status deployment/"$$HOST_SOURCE_RELEASE" --timeout=180s; \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$$HOST_PUSH_NAMESPACE" port-forward --address 0.0.0.0 service/"$$HOST_SOURCE_RELEASE" "$(VCLUSTER_BRIDGE_PORT)":8080 > "$(INTEGRATION_TMP_DIR)/port-forward-source.log" 2>&1 & \
+	SOURCE_PF_PID=$$!; \
+	trap 'kill $$SOURCE_PF_PID >/dev/null 2>&1 || true' EXIT; \
+	SOURCE_TOKEN=$$(KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$$HOST_PUSH_NAMESPACE" create token "$$HOST_SOURCE_RELEASE"); \
+	[ -n "$$SOURCE_TOKEN" ]; \
+	for i in $$(seq 1 30); do \
+		if curl -fsS -H "Authorization: Bearer $$SOURCE_TOKEN" "http://127.0.0.1:$(VCLUSTER_BRIDGE_PORT)/vcluster/v1/kubeconfig" > "$(INTEGRATION_TMP_DIR)/vcluster.raw.kubeconfig" 2>/dev/null; then \
+			break; \
+		fi; \
+		sleep 2; \
+	done; \
+	test -s "$(INTEGRATION_TMP_DIR)/vcluster.raw.kubeconfig"; \
 	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$(VCLUSTER_NAMESPACE)" port-forward --address 0.0.0.0 service/"$(VCLUSTER_NAME)" "$(VCLUSTER_CONNECT_PORT)":443 > "$(INTEGRATION_TMP_DIR)/port-forward-vcluster.log" 2>&1 & \
 	VCLUSTER_PF_PID=$$!; \
-	trap 'kill $$VCLUSTER_PF_PID >/dev/null 2>&1 || true' EXIT; \
-	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$(VCLUSTER_NAMESPACE)" get secret "vc-$(VCLUSTER_NAME)" -o yaml > "$(INTEGRATION_TMP_DIR)/vcluster.secret.yaml"; \
-	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl get -f "$(INTEGRATION_TMP_DIR)/vcluster.secret.yaml" -o jsonpath='{.data.config}' | base64 -d > "$(INTEGRATION_TMP_DIR)/vcluster.raw.kubeconfig"; \
+	trap 'kill $$VCLUSTER_PF_PID >/dev/null 2>&1 || true; kill $$SOURCE_PF_PID >/dev/null 2>&1 || true' EXIT; \
 	sed -E 's#server: https://[^[:space:]]+#server: https://localhost:$(VCLUSTER_CONNECT_PORT)#' "$(INTEGRATION_TMP_DIR)/vcluster.raw.kubeconfig" > "$(VCLUSTER_KUBECONFIG)"; \
 	sed -E "s#server: https://[^[:space:]]+#server: https://$$VCLUSTER_API_IP:8443#" "$(INTEGRATION_TMP_DIR)/vcluster.raw.kubeconfig" > "$(INTEGRATION_TMP_DIR)/vcluster.service.kubeconfig"; \
 	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$$HOST_PUSH_NAMESPACE" delete secret "$$HOST_PUSH_ACCESS_SECRET" --ignore-not-found; \
@@ -336,9 +367,6 @@ integration-test-vcluster: check-tools ## Run push-mode integration test into a 
 	KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl get namespace >/dev/null; \
 	KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl create namespace "$(CLUSTER_TARGET_NAMESPACE)" --dry-run=client -o yaml | KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl apply -f -; \
 	KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl create namespace "$(CLUSTER_TARGET_NAMESPACE_2)" --dry-run=client -o yaml | KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl apply -f -; \
-	INTEGRATION_IMAGE_OVERRIDE="$(INTEGRATION_IMAGE)"; \
-	INTEGRATION_IMAGE_REPOSITORY=$${INTEGRATION_IMAGE_OVERRIDE%:*}; \
-	INTEGRATION_IMAGE_TAG=$${INTEGRATION_IMAGE_OVERRIDE##*:}; \
 	HELM_CACHE_HOME="$(INTEGRATION_HELM_DIR)/cache" HELM_CONFIG_HOME="$(INTEGRATION_HELM_DIR)/config" HELM_DATA_HOME="$(INTEGRATION_HELM_DIR)/data" \
 	KUBECONFIG="$$HOST_KUBECONFIG_PATH" helm upgrade --install "$$HOST_PUSH_RELEASE" ./charts/secret-sync-controller \
 		--namespace "$$HOST_PUSH_NAMESPACE" \
