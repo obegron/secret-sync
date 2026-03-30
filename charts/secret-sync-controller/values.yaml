@@ -61,6 +61,16 @@ service:
   type: ClusterIP
   port: 8080
   publishNotReadyAddresses: true
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: secret-sync.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
 extraEnv: []
 extraVolumes: []
 extraVolumeMounts: []
