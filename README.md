@@ -196,7 +196,7 @@ That target creates:
 - the host-side `secret-sync-controller` push release
 - `.tmp/integration/vcluster.kubeconfig`
 
-After that, you can manually test the same push flow the automated target uses:
+After that, you can manually test the same push flow the automated target uses.
 
 If you want to reconnect to the `vcluster` manually later, re-export the defaults:
 
@@ -210,7 +210,7 @@ export SOURCE_NAMESPACE=secret-sync-vcluster
 export TARGET_NAMESPACE=shared-runtime
 ```
 
-Access the `vcluster` without the `vcluster` CLI:
+1. Reconnect to the `vcluster` API without the `vcluster` CLI:
 
 ```bash
 kubectl -n "$VCLUSTER_NAMESPACE" port-forward service/"$VCLUSTER_NAME" "$VCLUSTER_CONNECT_PORT":443
@@ -227,32 +227,13 @@ KUBECONFIG="$VCLUSTER_KUBECONFIG" kubectl get namespaces
 kubectl -n "$SOURCE_NAMESPACE" get pods
 ```
 
-Re-open the protected kubeconfig endpoint the automated test uses:
+2. Re-open the protected kubeconfig endpoint:
 
 ```bash
 kubectl -n "$SOURCE_NAMESPACE" port-forward --address 0.0.0.0 service/secret-sync-source "$VCLUSTER_BRIDGE_PORT":8080
 ```
 
-If you want success-path logs while setting this up manually, enable:
-
-```bash
---set-string controller.logReconcileActions=true
-```
-
-If you want broader troubleshooting logs, enable:
-
-```bash
---set-string controller.logVerbose=true
-```
-
-You can inspect basic runtime state without reading logs:
-
-```bash
-curl -fsS "http://127.0.0.1:$VCLUSTER_BRIDGE_PORT/status"
-curl -fsS "http://127.0.0.1:$VCLUSTER_BRIDGE_PORT/metrics"
-```
-
-The kubeconfig endpoint is OIDC-protected. The automated test uses the `secret-sync-source` service account token to access it. Manually, the equivalent is:
+3. Optional: verify the kubeconfig endpoint works:
 
 ```bash
 SOURCE_TOKEN=$(kubectl -n "$SOURCE_NAMESPACE" create token secret-sync-source)
@@ -261,7 +242,7 @@ curl -fsS \
   "http://127.0.0.1:$VCLUSTER_BRIDGE_PORT/vcluster/v1/kubeconfig" > .tmp/integration/vcluster.raw.kubeconfig
 ```
 
-Manual smoke test for host namespace -> `vcluster` push sync:
+4. Manual smoke test for host namespace -> `vcluster` push sync:
 
 ```bash
 kubectl -n "$SOURCE_NAMESPACE" create secret generic app-db-secret \
@@ -288,6 +269,13 @@ kubectl -n "$SOURCE_NAMESPACE" logs deploy/secret-sync-source
 kubectl -n "$SOURCE_NAMESPACE" logs deploy/secret-sync-controller
 curl -fsS "http://127.0.0.1:$VCLUSTER_BRIDGE_PORT/status"
 KUBECONFIG="$VCLUSTER_KUBECONFIG" kubectl -n "$TARGET_NAMESPACE" get secrets
+```
+
+Optional logging flags while troubleshooting:
+
+```bash
+--set-string controller.logReconcileActions=true
+--set-string controller.logVerbose=true
 ```
 
 ## License
