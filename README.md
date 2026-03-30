@@ -136,7 +136,7 @@ make run-oidc-helper
 In `source` mode, `secret-sync-controller` can expose the `vcluster` kubeconfig stored in a Secret from the source namespace.
 
 - endpoint: `GET /vcluster/v1/kubeconfig`
-- auth: same OIDC trust config as the bridge endpoint
+- auth: same OIDC trust config used by the protected source endpoints
   - `BRIDGE_TRUST_ISSUERS`
   - `BRIDGE_ALLOWED_SUBJECTS`
 - required config:
@@ -204,7 +204,7 @@ If you want to reconnect to the `vcluster` manually later, re-export the default
 export VCLUSTER_NAME=secret-sync-vcluster
 export VCLUSTER_NAMESPACE=secret-sync-vcluster
 export VCLUSTER_CONNECT_PORT=18443
-export VCLUSTER_BRIDGE_PORT=18082
+export SOURCE_ENDPOINT_PORT=18082
 export VCLUSTER_KUBECONFIG=.tmp/integration/vcluster.kubeconfig
 export SOURCE_NAMESPACE=secret-sync-vcluster
 export TARGET_NAMESPACE=shared-runtime
@@ -230,7 +230,7 @@ kubectl -n "$SOURCE_NAMESPACE" get pods
 2. Re-open the protected kubeconfig endpoint:
 
 ```bash
-kubectl -n "$SOURCE_NAMESPACE" port-forward --address 0.0.0.0 service/secret-sync-source "$VCLUSTER_BRIDGE_PORT":8080
+kubectl -n "$SOURCE_NAMESPACE" port-forward --address 0.0.0.0 service/secret-sync-source "$SOURCE_ENDPOINT_PORT":8080
 ```
 
 3. Optional: verify the kubeconfig endpoint works:
@@ -239,7 +239,7 @@ kubectl -n "$SOURCE_NAMESPACE" port-forward --address 0.0.0.0 service/secret-syn
 SOURCE_TOKEN=$(kubectl -n "$SOURCE_NAMESPACE" create token secret-sync-source)
 curl -fsS \
   -H "Authorization: Bearer $SOURCE_TOKEN" \
-  "http://127.0.0.1:$VCLUSTER_BRIDGE_PORT/vcluster/v1/kubeconfig" > .tmp/integration/vcluster.raw.kubeconfig
+  "http://127.0.0.1:$SOURCE_ENDPOINT_PORT/vcluster/v1/kubeconfig" > .tmp/integration/vcluster.raw.kubeconfig
 ```
 
 4. Manual smoke test for host namespace -> `vcluster` push sync:
@@ -267,7 +267,7 @@ Useful checks:
 kubectl -n "$SOURCE_NAMESPACE" get pods
 kubectl -n "$SOURCE_NAMESPACE" logs deploy/secret-sync-source
 kubectl -n "$SOURCE_NAMESPACE" logs deploy/secret-sync-controller
-curl -fsS "http://127.0.0.1:$VCLUSTER_BRIDGE_PORT/status"
+curl -fsS "http://127.0.0.1:$SOURCE_ENDPOINT_PORT/status"
 KUBECONFIG="$VCLUSTER_KUBECONFIG" kubectl -n "$TARGET_NAMESPACE" get secrets
 ```
 
