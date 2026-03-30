@@ -17,6 +17,7 @@ serviceAccount:
 
 rbac:
   create: true
+  namespaced: false
 
 controller:
   syncMode: push

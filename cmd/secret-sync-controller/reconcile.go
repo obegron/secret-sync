@@ -530,6 +530,10 @@ func (c *controller) emitEvent(ctx context.Context, src *corev1.Secret, eventTyp
 	if c.cfg.syncMode == modePull && c.cfg.sourceProvider == sourceProviderBridge {
 		return
 	}
+	eventClient := c.hostClient
+	if c.cfg.syncMode == modePush && c.localClient != nil {
+		eventClient = c.localClient
+	}
 
 	event := &corev1.Event{
 		ObjectMeta: metav1.ObjectMeta{
@@ -554,7 +558,7 @@ func (c *controller) emitEvent(ctx context.Context, src *corev1.Secret, eventTyp
 		Count:          1,
 	}
 
-	if _, err := c.hostClient.CoreV1().Events(src.Namespace).Create(ctx, event, metav1.CreateOptions{}); err != nil {
+	if _, err := eventClient.CoreV1().Events(src.Namespace).Create(ctx, event, metav1.CreateOptions{}); err != nil {
 		c.metrics.eventErrorTotal.Add(1)
 		log.Printf("emit event %s/%s failed: %v", src.Namespace, src.Name, err)
 		return

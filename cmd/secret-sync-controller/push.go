@@ -12,7 +12,7 @@ import (
 
 func (c *controller) runPush(ctx context.Context) {
 	factory := informers.NewSharedInformerFactoryWithOptions(
-		c.hostClient,
+		c.localClient,
 		0,
 		informers.WithNamespace(namespaceOrAll(c.cfg.sourceNamespace)),
 	)

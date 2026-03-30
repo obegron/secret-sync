@@ -35,7 +35,7 @@ VCLUSTER_CONTROLLER_RELEASE ?= secret-sync-controller
 VCLUSTER_HOST_ACCESS_SECRET ?= secret-sync-host-access
 VCLUSTER_HOST_ACCESS_SA ?= secret-sync-vcluster-host
 
-.PHONY: help tidy fmt vet build build-oidc-helper test docker-build-local docker-build docker-push show-version set-version scan-image run run-oidc-helper clean check-tools integration-up integration-test integration-test-pull integration-test-vcluster integration-test-collision integration-down
+.PHONY: help tidy fmt vet build build-oidc-helper test docker-build-local docker-build docker-push show-version set-version scan-image run run-oidc-helper clean check-tools integration-up integration-test integration-test-pull integration-test-vcluster integration-test-vcluster-bridge integration-test-collision integration-down
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*## "; print "Targets:"} /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -273,7 +273,137 @@ integration-test-pull: integration-up ## Run pull-mode integration test with sta
 	kill $$OIDC_PID >/dev/null 2>&1 || true; \
 	trap - EXIT
 
-integration-test-vcluster: check-tools ## Run pull-mode integration test from a Helm-installed vcluster
+integration-test-vcluster: check-tools ## Run push-mode integration test into a Helm-installed vcluster using the vc-* kubeconfig secret
+	@set -euo pipefail; \
+	HOST_PUSH_NAMESPACE="$(VCLUSTER_NAMESPACE)"; \
+	HOST_PUSH_RELEASE="secret-sync-controller"; \
+	HOST_PUSH_ACCESS_SECRET="secret-sync-vcluster-access"; \
+	HOST_KUBECONFIG_PATH="$(INTEGRATION_TMP_DIR)/host.kubeconfig"; \
+	mkdir -p "$(INTEGRATION_TMP_DIR)" "$(INTEGRATION_HELM_DIR)/cache" "$(INTEGRATION_HELM_DIR)/config" "$(INTEGRATION_HELM_DIR)/data"; \
+	if ! k3d cluster list | awk 'NR>1 {print $$1}' | grep -qx "$(INTEGRATION_CLUSTER)"; then \
+		k3d cluster create "$(INTEGRATION_CLUSTER)"; \
+	fi; \
+	k3d kubeconfig get "$(INTEGRATION_CLUSTER)" > "$$HOST_KUBECONFIG_PATH.raw"; \
+	sed 's/0\.0\.0\.0/127.0.0.1/g' "$$HOST_KUBECONFIG_PATH.raw" > "$$HOST_KUBECONFIG_PATH"; \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl config use-context "k3d-$(INTEGRATION_CLUSTER)" >/dev/null; \
+	for i in $$(seq 1 30); do \
+		if KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl get nodes >/dev/null 2>&1; then \
+			break; \
+		fi; \
+		sleep 2; \
+	done; \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl get nodes >/dev/null; \
+	docker build -t "$(INTEGRATION_IMAGE)" .; \
+	k3d image import -c "$(INTEGRATION_CLUSTER)" "$(INTEGRATION_IMAGE)"; \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl create namespace "$(VCLUSTER_NAMESPACE)" --dry-run=client -o yaml | KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl apply -f -; \
+	HELM_CACHE_HOME="$(INTEGRATION_HELM_DIR)/cache" HELM_CONFIG_HOME="$(INTEGRATION_HELM_DIR)/config" HELM_DATA_HOME="$(INTEGRATION_HELM_DIR)/data" \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" helm upgrade --install "$(VCLUSTER_NAME)" vcluster --repo https://charts.loft.sh \
+		--namespace "$(VCLUSTER_NAMESPACE)" \
+		--create-namespace \
+		--wait \
+		--timeout 5m; \
+	for i in $$(seq 1 60); do \
+		if KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$(VCLUSTER_NAMESPACE)" get secret "vc-$(VCLUSTER_NAME)" >/dev/null 2>&1; then \
+			break; \
+		fi; \
+		sleep 2; \
+	done; \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$(VCLUSTER_NAMESPACE)" get secret "vc-$(VCLUSTER_NAME)" >/dev/null; \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$(VCLUSTER_NAMESPACE)" port-forward service/"$(VCLUSTER_NAME)" "$(VCLUSTER_CONNECT_PORT)":443 > "$(INTEGRATION_TMP_DIR)/port-forward-vcluster.log" 2>&1 & \
+	VCLUSTER_PF_PID=$$!; \
+	trap 'kill $$VCLUSTER_PF_PID >/dev/null 2>&1 || true' EXIT; \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$(VCLUSTER_NAMESPACE)" get secret "vc-$(VCLUSTER_NAME)" -o yaml > "$(INTEGRATION_TMP_DIR)/vcluster.secret.yaml"; \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl get -f "$(INTEGRATION_TMP_DIR)/vcluster.secret.yaml" -o jsonpath='{.data.config}' | base64 -d > "$(INTEGRATION_TMP_DIR)/vcluster.raw.kubeconfig"; \
+	sed -E 's#server: https://[^[:space:]]+#server: https://localhost:$(VCLUSTER_CONNECT_PORT)#' "$(INTEGRATION_TMP_DIR)/vcluster.raw.kubeconfig" > "$(VCLUSTER_KUBECONFIG)"; \
+	sed -E 's#server: https://[^[:space:]]+#server: https://$(VCLUSTER_NAME).$(VCLUSTER_NAMESPACE).svc:443#' "$(INTEGRATION_TMP_DIR)/vcluster.raw.kubeconfig" > "$(INTEGRATION_TMP_DIR)/vcluster.service.kubeconfig"; \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$$HOST_PUSH_NAMESPACE" delete secret "$$HOST_PUSH_ACCESS_SECRET" --ignore-not-found; \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$$HOST_PUSH_NAMESPACE" create secret generic "$$HOST_PUSH_ACCESS_SECRET" \
+		--from-file=config="$(INTEGRATION_TMP_DIR)/vcluster.service.kubeconfig" \
+		--dry-run=client -o yaml | KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl apply -f -; \
+	for i in $$(seq 1 30); do \
+		if KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl get namespace >/dev/null 2>&1; then \
+			break; \
+		fi; \
+		sleep 2; \
+	done; \
+	KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl get namespace >/dev/null; \
+	KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl create namespace "$(CLUSTER_TARGET_NAMESPACE)" --dry-run=client -o yaml | KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl apply -f -; \
+	KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl create namespace "$(CLUSTER_TARGET_NAMESPACE_2)" --dry-run=client -o yaml | KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl apply -f -; \
+	INTEGRATION_IMAGE_OVERRIDE="$(INTEGRATION_IMAGE)"; \
+	INTEGRATION_IMAGE_REPOSITORY=$${INTEGRATION_IMAGE_OVERRIDE%:*}; \
+	INTEGRATION_IMAGE_TAG=$${INTEGRATION_IMAGE_OVERRIDE##*:}; \
+	HELM_CACHE_HOME="$(INTEGRATION_HELM_DIR)/cache" HELM_CONFIG_HOME="$(INTEGRATION_HELM_DIR)/config" HELM_DATA_HOME="$(INTEGRATION_HELM_DIR)/data" \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" helm upgrade --install "$$HOST_PUSH_RELEASE" ./charts/secret-sync-controller \
+		--namespace "$$HOST_PUSH_NAMESPACE" \
+		--create-namespace \
+		--set-string fullnameOverride="$$HOST_PUSH_RELEASE" \
+		--set-string image.repository="$$INTEGRATION_IMAGE_REPOSITORY" \
+		--set-string image.tag="$$INTEGRATION_IMAGE_TAG" \
+		--set-string controller.syncMode=push \
+		--set-string controller.sourceNamespace="$$HOST_PUSH_NAMESPACE" \
+		--set-string controller.hostKubeconfig=/etc/secret-sync-target/config \
+		--set rbac.namespaced=true \
+		--set-string extraVolumes[0].name=vcluster-kubeconfig \
+		--set-string extraVolumes[0].secret.secretName="$$HOST_PUSH_ACCESS_SECRET" \
+		--set-string extraVolumeMounts[0].name=vcluster-kubeconfig \
+		--set-string extraVolumeMounts[0].mountPath=/etc/secret-sync-target \
+		--set extraVolumeMounts[0].readOnly=true; \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$$HOST_PUSH_NAMESPACE" rollout status deployment/"$$HOST_PUSH_RELEASE" --timeout=180s; \
+	PUSH_SECRET_NAME="$(SOURCE_SECRET_NAME)-vcluster"; \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$$HOST_PUSH_NAMESPACE" delete secret "$$PUSH_SECRET_NAME" --ignore-not-found; \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$$HOST_PUSH_NAMESPACE" create secret generic "$$PUSH_SECRET_NAME" \
+		--from-literal=username=vclusteruser \
+		--from-literal=password=vclustersecret \
+		--dry-run=client -o yaml | KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl apply -f -; \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$$HOST_PUSH_NAMESPACE" patch secret "$$PUSH_SECRET_NAME" --type merge -p '{"metadata":{"labels":{"obegron.github.io/secret-sync-enabled":"true"}}}'; \
+	PUSH_TARGETS_JSON=$$(printf '[{"kind":"cluster","namespace":"%s"},{"kind":"cluster","namespace":"%s"}]' "$(CLUSTER_TARGET_NAMESPACE)" "$(CLUSTER_TARGET_NAMESPACE_2)"); \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$$HOST_PUSH_NAMESPACE" annotate secret "$$PUSH_SECRET_NAME" \
+		obegron.github.io/secret-sync-targets="$$PUSH_TARGETS_JSON" \
+		obegron.github.io/delete-policy=delete --overwrite; \
+	for i in $$(seq 1 30); do \
+		if KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PUSH_SECRET_NAME" >/dev/null 2>&1 && \
+		   KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PUSH_SECRET_NAME" >/dev/null 2>&1; then \
+			break; \
+		fi; \
+		sleep 2; \
+	done; \
+	vc_user=$$(KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PUSH_SECRET_NAME" -o jsonpath='{.data.username}' | base64 -d); \
+	vc_pw=$$(KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PUSH_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d); \
+	vc_user2=$$(KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PUSH_SECRET_NAME" -o jsonpath='{.data.username}' | base64 -d); \
+	vc_pw2=$$(KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PUSH_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d); \
+	[ "$$vc_user" = "vclusteruser" ]; \
+	[ "$$vc_pw" = "vclustersecret" ]; \
+	[ "$$vc_user2" = "vclusteruser" ]; \
+	[ "$$vc_pw2" = "vclustersecret" ]; \
+	pw_b64=$$(printf 'vclustersecret2' | base64 | tr -d '\n'); \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$$HOST_PUSH_NAMESPACE" patch secret "$$PUSH_SECRET_NAME" --type merge -p "{\"data\":{\"password\":\"$$pw_b64\"}}"; \
+	for i in $$(seq 1 30); do \
+		vc_pw3=$$(KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PUSH_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d 2>/dev/null || true); \
+		vc_pw4=$$(KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PUSH_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d 2>/dev/null || true); \
+		if [ "$$vc_pw3" = "vclustersecret2" ] && [ "$$vc_pw4" = "vclustersecret2" ]; then \
+			break; \
+		fi; \
+		sleep 2; \
+	done; \
+	vc_pw3=$$(KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PUSH_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d); \
+	vc_pw4=$$(KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PUSH_SECRET_NAME" -o jsonpath='{.data.password}' | base64 -d); \
+	[ "$$vc_pw3" = "vclustersecret2" ]; \
+	[ "$$vc_pw4" = "vclustersecret2" ]; \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$$HOST_PUSH_NAMESPACE" delete secret "$$PUSH_SECRET_NAME"; \
+	for i in $$(seq 1 30); do \
+		if ! KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PUSH_SECRET_NAME" >/dev/null 2>&1 && \
+		   ! KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PUSH_SECRET_NAME" >/dev/null 2>&1; then \
+			break; \
+		fi; \
+		sleep 2; \
+	done; \
+	! KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl -n "$(CLUSTER_TARGET_NAMESPACE)" get secret "$$PUSH_SECRET_NAME" >/dev/null 2>&1; \
+	! KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl -n "$(CLUSTER_TARGET_NAMESPACE_2)" get secret "$$PUSH_SECRET_NAME" >/dev/null 2>&1; \
+	echo "integration vcluster push test passed"; \
+	kill $$VCLUSTER_PF_PID >/dev/null 2>&1 || true; \
+	trap - EXIT
+
+integration-test-vcluster-bridge: check-tools ## Run bridge-mode integration test from a Helm-installed vcluster
 	@set -euo pipefail; \
 	HOST_SOURCE_NAMESPACE="$(VCLUSTER_NAMESPACE)"; \
 	HOST_SOURCE_RELEASE="secret-sync-source"; \
@@ -312,7 +442,8 @@ integration-test-vcluster: check-tools ## Run pull-mode integration test from a 
 	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$(VCLUSTER_NAMESPACE)" port-forward service/"$(VCLUSTER_NAME)" "$(VCLUSTER_CONNECT_PORT)":443 > "$(INTEGRATION_TMP_DIR)/port-forward-vcluster.log" 2>&1 & \
 	VCLUSTER_PF_PID=$$!; \
 	trap 'kill $$VCLUSTER_PF_PID >/dev/null 2>&1 || true' EXIT; \
-	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$(VCLUSTER_NAMESPACE)" get secret "vc-$(VCLUSTER_NAME)" -o jsonpath='{.data.config}' | base64 -d > "$(INTEGRATION_TMP_DIR)/vcluster.raw.kubeconfig"; \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$(VCLUSTER_NAMESPACE)" get secret "vc-$(VCLUSTER_NAME)" -o yaml > "$(INTEGRATION_TMP_DIR)/vcluster.secret.yaml"; \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl get -f "$(INTEGRATION_TMP_DIR)/vcluster.secret.yaml" -o jsonpath='{.data.config}' | base64 -d > "$(INTEGRATION_TMP_DIR)/vcluster.raw.kubeconfig"; \
 	sed -E 's#server: https://[^[:space:]]+#server: https://localhost:$(VCLUSTER_CONNECT_PORT)#' "$(INTEGRATION_TMP_DIR)/vcluster.raw.kubeconfig" > "$(VCLUSTER_KUBECONFIG)"; \
 	for i in $$(seq 1 30); do \
 		if KUBECONFIG="$(VCLUSTER_KUBECONFIG)" kubectl get namespace >/dev/null 2>&1; then \
