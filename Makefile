@@ -293,6 +293,7 @@ integration-test-vcluster: check-tools ## Run push-mode integration test into a 
 	fi; \
 	k3d kubeconfig get "$(INTEGRATION_CLUSTER)" > "$$HOST_KUBECONFIG_PATH.raw"; \
 	sed 's/0\.0\.0\.0/127.0.0.1/g' "$$HOST_KUBECONFIG_PATH.raw" > "$$HOST_KUBECONFIG_PATH"; \
+	HOST_GATEWAY_IP=$$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' k3d-$(INTEGRATION_CLUSTER)-server-0); \
 	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl config use-context "k3d-$(INTEGRATION_CLUSTER)" >/dev/null; \
 	for i in $$(seq 1 30); do \
 		if KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl get nodes >/dev/null 2>&1; then \
@@ -334,7 +335,7 @@ integration-test-vcluster: check-tools ## Run push-mode integration test into a 
 		--set-string controller.sourceNamespace="$$HOST_PUSH_NAMESPACE" \
 		--set-string controller.kubeconfigSecretName="vc-$(VCLUSTER_NAME)" \
 		--set-string controller.oidcProxyEnabled=true \
-		--set-string controller.bridgeTrustIssuers="$$HOST_ISSUER=http://$$HOST_SOURCE_RELEASE.$$HOST_PUSH_NAMESPACE.svc:8080" \
+		--set-string controller.bridgeTrustIssuers="$$HOST_ISSUER=http://$$HOST_GATEWAY_IP:$(VCLUSTER_BRIDGE_PORT)" \
 		--set-string controller.bridgeAllowedSubjects="$$HOST_SOURCE_SUBJECT"; \
 	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$$HOST_PUSH_NAMESPACE" rollout status deployment/"$$HOST_SOURCE_RELEASE" --timeout=180s; \
 	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$$HOST_PUSH_NAMESPACE" port-forward --address 0.0.0.0 service/"$$HOST_SOURCE_RELEASE" "$(VCLUSTER_BRIDGE_PORT)":8080 > "$(INTEGRATION_TMP_DIR)/port-forward-source.log" 2>&1 & \
@@ -343,7 +344,7 @@ integration-test-vcluster: check-tools ## Run push-mode integration test into a 
 	SOURCE_TOKEN=$$(KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$$HOST_PUSH_NAMESPACE" create token "$$HOST_SOURCE_RELEASE"); \
 	[ -n "$$SOURCE_TOKEN" ]; \
 	for i in $$(seq 1 30); do \
-		if curl -fsS -H "Authorization: Bearer $$SOURCE_TOKEN" "http://127.0.0.1:$(VCLUSTER_BRIDGE_PORT)/vcluster/v1/kubeconfig" > "$(INTEGRATION_TMP_DIR)/vcluster.raw.kubeconfig" 2>/dev/null; then \
+		if curl --max-time 5 -fsS -H "Authorization: Bearer $$SOURCE_TOKEN" "http://127.0.0.1:$(VCLUSTER_BRIDGE_PORT)/vcluster/v1/kubeconfig" > "$(INTEGRATION_TMP_DIR)/vcluster.raw.kubeconfig" 2>/dev/null; then \
 			break; \
 		fi; \
 		sleep 2; \
