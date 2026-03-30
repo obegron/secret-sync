@@ -18,6 +18,9 @@ image:
 
 controller:
   syncMode: push
+  sourceProvider: kubernetes
+  kubeconfigSecretName: ""
+  kubeconfigSecretKey: config
   hostKubeconfig: ""
   sourceNamespace: tenant-host-ns
   defaultDeletePolicy: delete
@@ -39,5 +42,16 @@ helm template secret-sync-controller \
 
 RBAC behavior:
 
-- the chart renders `ClusterRole` + `ClusterRoleBinding`
-- this is required for push mode and for pull mode when targets are outside the controller release namespace
+- default: renders `ClusterRole` + `ClusterRoleBinding`
+- source mode renders `Role` + `RoleBinding`
+- set `rbac.namespaced=true` to force namespaced RBAC for host-side push deployments that only need to read source secrets in their own namespace
+
+Kubeconfig endpoint:
+
+- in `source` mode, the chart can expose `GET /vcluster/v1/kubeconfig`
+- set:
+  - `controller.kubeconfigSecretName`
+  - optionally `controller.kubeconfigSecretKey`
+- protect it with:
+  - `controller.bridgeTrustIssuers`
+  - `controller.bridgeAllowedSubjects`
