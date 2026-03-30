@@ -24,6 +24,8 @@ controller:
   sourceProvider: kubernetes
   logVerbose: false
   logReconcileActions: false
+  kubeconfigSecretName: ""
+  kubeconfigSecretKey: config
   hostKubeconfig: ""
   sourceNamespace: ""
   targetNamespace: ""

@@ -147,11 +147,7 @@ func (c *controller) handleBridgeList(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if c.bridgeVerifier == nil {
-		http.Error(w, "bridge verifier is not configured\n", http.StatusServiceUnavailable)
-		return
-	}
-	if _, err := c.bridgeVerifier.AuthenticateRequest(r); err != nil {
+	if err := c.authenticateProtectedSourceRequest(r); err != nil {
 		http.Error(w, err.Error()+"\n", http.StatusUnauthorized)
 		return
 	}
@@ -174,6 +170,48 @@ func (c *controller) handleBridgeList(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func (c *controller) handleVClusterKubeconfig(w http.ResponseWriter, r *http.Request) {
+	if c.cfg.syncMode != modeSource {
+		http.NotFound(w, r)
+		return
+	}
+	if strings.TrimSpace(c.cfg.kubeconfigSecretName) == "" {
+		http.Error(w, "kubeconfig secret is not configured\n", http.StatusServiceUnavailable)
+		return
+	}
+	if err := c.authenticateProtectedSourceRequest(r); err != nil {
+		http.Error(w, err.Error()+"\n", http.StatusUnauthorized)
+		return
+	}
+
+	secret, err := c.hostClient.CoreV1().Secrets(c.cfg.sourceNamespace).Get(r.Context(), c.cfg.kubeconfigSecretName, metav1.GetOptions{})
+	if err != nil {
+		http.Error(w, "failed to read kubeconfig secret\n", http.StatusBadGateway)
+		return
+	}
+	data, ok := secret.Data[c.cfg.kubeconfigSecretKey]
+	if !ok {
+		http.Error(w, "kubeconfig key is missing\n", http.StatusBadGateway)
+		return
+	}
+	if len(data) == 0 {
+		http.Error(w, "kubeconfig key is empty\n", http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/yaml")
+	w.Header().Set("Content-Disposition", `attachment; filename="kubeconfig.yaml"`)
+	_, _ = w.Write(data)
+}
+
+func (c *controller) authenticateProtectedSourceRequest(r *http.Request) error {
+	if c.bridgeVerifier == nil {
+		return errors.New("request verifier is not configured")
+	}
+	_, err := c.bridgeVerifier.AuthenticateRequest(r)
+	return err
 }
 
 func newBridgeHTTPClient(caFile, tokenFile string) (*http.Client, error) {

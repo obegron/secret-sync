@@ -146,6 +146,7 @@ func (c *controller) serveHTTP(ctx context.Context) {
 	mux.HandleFunc("/status", c.handleStatus)
 	mux.HandleFunc("/metrics", c.handleMetrics)
 	mux.HandleFunc("/bridge/v1/secrets", c.handleBridgeList)
+	mux.HandleFunc("/vcluster/v1/kubeconfig", c.handleVClusterKubeconfig)
 	mux.HandleFunc("/.well-known/openid-configuration", c.handleOIDCConfigProxy)
 	mux.HandleFunc("/openid/v1/jwks", c.handleJWKSProxy)
 

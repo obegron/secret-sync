@@ -130,6 +130,27 @@ make build-oidc-helper
 make run-oidc-helper
 ```
 
+## Kubeconfig endpoint
+
+In `source` mode, `secret-sync-controller` can expose the `vcluster` kubeconfig stored in a Secret from the source namespace.
+
+- endpoint: `GET /vcluster/v1/kubeconfig`
+- auth: same OIDC trust config as the bridge endpoint
+  - `BRIDGE_TRUST_ISSUERS`
+  - `BRIDGE_ALLOWED_SUBJECTS`
+- required config:
+  - `KUBECONFIG_SECRET_NAME`
+- optional config:
+  - `KUBECONFIG_SECRET_KEY` default: `config`
+
+Helm values:
+
+```bash
+--set-string controller.syncMode=source \
+--set-string controller.sourceNamespace=secret-sync-vcluster \
+--set-string controller.kubeconfigSecretName=vc-secret-sync-vcluster
+```
+
 ## Helm-only vcluster integration
 
 `make integration-test-vcluster` creates a `vcluster` via the official Helm chart, extracts the generated kubeconfig from the `vc-<release>` Secret, port-forwards the vcluster API locally, and deploys two `secret-sync-controller` instances:

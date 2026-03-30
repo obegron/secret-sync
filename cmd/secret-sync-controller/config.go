@@ -17,6 +17,8 @@ type runtimeConfig struct {
 	sourceProvider         string
 	logVerbose             bool
 	logReconcileActions    bool
+	kubeconfigSecretName   string
+	kubeconfigSecretKey    string
 	hostKubeconfig         string
 	hostAPIServer          string
 	hostTokenFile          string
@@ -74,6 +76,8 @@ func loadRuntimeConfig() (runtimeConfig, map[string]struct{}, error) {
 	cfg := runtimeConfig{
 		syncMode:               syncMode,
 		sourceProvider:         sourceProvider,
+		kubeconfigSecretName:   strings.TrimSpace(os.Getenv("KUBECONFIG_SECRET_NAME")),
+		kubeconfigSecretKey:    envOrDefault("KUBECONFIG_SECRET_KEY", "config"),
 		hostKubeconfig:         os.Getenv("HOST_KUBECONFIG"),
 		hostAPIServer:          strings.TrimSpace(os.Getenv("HOST_API_SERVER")),
 		hostTokenFile:          envOrDefault("HOST_TOKEN_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/token"),

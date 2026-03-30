@@ -31,6 +31,10 @@ spec:
               value: {{ .Values.controller.logVerbose | quote }}
             - name: LOG_RECONCILE_ACTIONS
               value: {{ .Values.controller.logReconcileActions | quote }}
+            - name: KUBECONFIG_SECRET_NAME
+              value: {{ .Values.controller.kubeconfigSecretName | quote }}
+            - name: KUBECONFIG_SECRET_KEY
+              value: {{ .Values.controller.kubeconfigSecretKey | quote }}
             - name: HOST_KUBECONFIG
               value: {{ .Values.controller.hostKubeconfig | quote }}
             - name: SOURCE_NAMESPACE
