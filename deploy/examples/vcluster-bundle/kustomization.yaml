@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace-secret-sync-vcluster.yaml
+  - rendered-vcluster/vcluster-rendered.yaml
+
+helmGlobals:
+  chartHome: ../../../charts
+
+helmCharts:
+  - name: secret-sync-controller
+    releaseName: secret-sync-source
+    namespace: secret-sync-vcluster
+    valuesFile: outer-secret-sync-values.yaml

@@ -1,0 +1,59 @@
+experimental:
+  deploy:
+    host:
+      manifests: |-
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: secret-sync-vcluster
+    vcluster:
+      manifests: |-
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: secret-sync-vcluster-system
+        ---
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: shared-runtime
+        ---
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: shared-runtime-2
+      helm:
+        - chart:
+            # Replace this with the base64-encoded tgz bundle for ./charts/secret-sync-controller.
+            bundle: REPLACE_WITH_SECRET_SYNC_CONTROLLER_CHART_BUNDLE
+          values: |-
+            fullnameOverride: secret-sync-controller
+            controller:
+              syncMode: pull
+              sourceProvider: bridge
+              sourceNamespace: secret-sync-vcluster
+              targetNamespace: shared-runtime
+              bridgeBaseURL: https://secret-sync-source.example.test
+              oidcProxyEnabled: true
+              oidcProxyBaseURL: https://secret-sync-controller.example.test
+              logVerbose: true
+            service:
+              enabled: true
+              type: ClusterIP
+              port: 8080
+            ingress:
+              enabled: true
+              className: nginx
+              hosts:
+                - host: secret-sync-controller.example.test
+                  paths:
+                    - path: /
+                      pathType: Prefix
+            extraEnv:
+              - name: KUBERNETES_SERVICE_HOST
+                value: secret-sync-vcluster.secret-sync-vcluster.svc
+              - name: KUBERNETES_SERVICE_PORT
+                value: "443"
+          release:
+            name: secret-sync-controller
+            namespace: secret-sync-vcluster-system
