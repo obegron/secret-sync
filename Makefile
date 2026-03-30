@@ -75,7 +75,6 @@ set-version: ## Set VERSION and sync chart version/appVersion (usage: make set-v
 	@printf '%s\n' "$(VERSION)" > "$(VERSION_FILE)"
 	@sed -E -i 's/^version: .*/version: $(VERSION)/' charts/secret-sync-controller/Chart.yaml
 	@sed -E -i 's/^appVersion: .*/appVersion: "$(VERSION)"/' charts/secret-sync-controller/Chart.yaml
-	@sed -E -i 's|^[[:space:]]*image: .*|          image: $(IMAGE_NAME):$(VERSION)|' deploy/base/deployment.yaml
 	@echo "Set version to $(VERSION)"
 
 scan-image: docker-build-local ## Scan local container image with Trivy
@@ -106,16 +105,23 @@ check-tools: ## Verify required integration tools are installed
 
 integration-up: check-tools ## Create local k3d + controller integration environment
 	@set -euo pipefail; \
+	INTEGRATION_IMAGE_OVERRIDE="$(INTEGRATION_IMAGE)"; \
+	INTEGRATION_IMAGE_REPOSITORY=$${INTEGRATION_IMAGE_OVERRIDE%:*}; \
+	INTEGRATION_IMAGE_TAG=$${INTEGRATION_IMAGE_OVERRIDE##*:}; \
 	if ! k3d cluster list | awk 'NR>1 {print $$1}' | grep -qx "$(INTEGRATION_CLUSTER)"; then \
 		k3d cluster create "$(INTEGRATION_CLUSTER)"; \
 	fi; \
 	kubectl config use-context "k3d-$(INTEGRATION_CLUSTER)" >/dev/null; \
 	docker build -t "$(INTEGRATION_IMAGE)" .; \
 	k3d image import -c "$(INTEGRATION_CLUSTER)" "$(INTEGRATION_IMAGE)"; \
-	mkdir -p "$(INTEGRATION_TMP_DIR)"; \
-	kubectl apply -f deploy/base/namespace.yaml; \
-	kubectl kustomize --load-restrictor=LoadRestrictionsNone deploy/base | kubectl apply -f -; \
-	kubectl -n "$(CONTROLLER_NAMESPACE)" set image deployment/secret-sync-controller controller="$(INTEGRATION_IMAGE)"; \
+	mkdir -p "$(INTEGRATION_TMP_DIR)" "$(INTEGRATION_HELM_DIR)/cache" "$(INTEGRATION_HELM_DIR)/config" "$(INTEGRATION_HELM_DIR)/data"; \
+	kubectl create namespace "$(CONTROLLER_NAMESPACE)" --dry-run=client -o yaml | kubectl apply -f -; \
+	HELM_CACHE_HOME="$(INTEGRATION_HELM_DIR)/cache" HELM_CONFIG_HOME="$(INTEGRATION_HELM_DIR)/config" HELM_DATA_HOME="$(INTEGRATION_HELM_DIR)/data" \
+	helm upgrade --install secret-sync-controller ./charts/secret-sync-controller \
+		--namespace "$(CONTROLLER_NAMESPACE)" \
+		--create-namespace \
+		--set-string image.repository="$$INTEGRATION_IMAGE_REPOSITORY" \
+		--set-string image.tag="$$INTEGRATION_IMAGE_TAG"; \
 	kubectl -n "$(CONTROLLER_NAMESPACE)" rollout status deployment/secret-sync-controller --timeout=180s; \
 	kubectl create namespace "$(SOURCE_NAMESPACE)" --dry-run=client -o yaml | kubectl apply -f -; \
 	kubectl create namespace "$(CLUSTER_TARGET_NAMESPACE)" --dry-run=client -o yaml | kubectl apply -f -; \

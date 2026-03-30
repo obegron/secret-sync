@@ -90,7 +90,6 @@ make docker-push
 - `VERSION`
 - `charts/secret-sync-controller/Chart.yaml` `version`
 - `charts/secret-sync-controller/Chart.yaml` `appVersion`
-- `deploy/base/deployment.yaml` image tag
 
 Run container vulnerability scan:
 
@@ -111,22 +110,11 @@ make integration-down
 ## Deploy
 
 ```bash
-kubectl apply -k deploy/base
-```
-
-```bash
 helm upgrade --install secret-sync-controller \
   ./charts/secret-sync-controller \
   --namespace secret-sync-system \
   --create-namespace
 ```
-
-## Examples
-
-- `deploy/examples/source-secret.yaml`
-- `deploy/examples/source-secret-cluster-only.yaml`
-- `deploy/examples/source-secret-many-namespaces.yaml`
-- `deploy/examples/source-secret-renamed-target.yaml`
 
 ## OIDC helper (for vcluster pull auth)
 
