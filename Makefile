@@ -309,13 +309,14 @@ integration-test-vcluster: check-tools ## Run push-mode integration test into a 
 		sleep 2; \
 	done; \
 	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$(VCLUSTER_NAMESPACE)" get secret "vc-$(VCLUSTER_NAME)" >/dev/null; \
-	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$(VCLUSTER_NAMESPACE)" port-forward service/"$(VCLUSTER_NAME)" "$(VCLUSTER_CONNECT_PORT)":443 > "$(INTEGRATION_TMP_DIR)/port-forward-vcluster.log" 2>&1 & \
+	VCLUSTER_API_IP=$$(KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$(VCLUSTER_NAMESPACE)" get endpoints "$(VCLUSTER_NAME)" -o jsonpath='{.subsets[0].addresses[0].ip}'); \
+	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$(VCLUSTER_NAMESPACE)" port-forward --address 0.0.0.0 service/"$(VCLUSTER_NAME)" "$(VCLUSTER_CONNECT_PORT)":443 > "$(INTEGRATION_TMP_DIR)/port-forward-vcluster.log" 2>&1 & \
 	VCLUSTER_PF_PID=$$!; \
 	trap 'kill $$VCLUSTER_PF_PID >/dev/null 2>&1 || true' EXIT; \
 	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$(VCLUSTER_NAMESPACE)" get secret "vc-$(VCLUSTER_NAME)" -o yaml > "$(INTEGRATION_TMP_DIR)/vcluster.secret.yaml"; \
 	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl get -f "$(INTEGRATION_TMP_DIR)/vcluster.secret.yaml" -o jsonpath='{.data.config}' | base64 -d > "$(INTEGRATION_TMP_DIR)/vcluster.raw.kubeconfig"; \
 	sed -E 's#server: https://[^[:space:]]+#server: https://localhost:$(VCLUSTER_CONNECT_PORT)#' "$(INTEGRATION_TMP_DIR)/vcluster.raw.kubeconfig" > "$(VCLUSTER_KUBECONFIG)"; \
-	sed -E 's#server: https://[^[:space:]]+#server: https://$(VCLUSTER_NAME).$(VCLUSTER_NAMESPACE).svc:443#' "$(INTEGRATION_TMP_DIR)/vcluster.raw.kubeconfig" > "$(INTEGRATION_TMP_DIR)/vcluster.service.kubeconfig"; \
+	sed -E "s#server: https://[^[:space:]]+#server: https://$$VCLUSTER_API_IP:8443#" "$(INTEGRATION_TMP_DIR)/vcluster.raw.kubeconfig" > "$(INTEGRATION_TMP_DIR)/vcluster.service.kubeconfig"; \
 	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$$HOST_PUSH_NAMESPACE" delete secret "$$HOST_PUSH_ACCESS_SECRET" --ignore-not-found; \
 	KUBECONFIG="$$HOST_KUBECONFIG_PATH" kubectl -n "$$HOST_PUSH_NAMESPACE" create secret generic "$$HOST_PUSH_ACCESS_SECRET" \
 		--from-file=config="$(INTEGRATION_TMP_DIR)/vcluster.service.kubeconfig" \
